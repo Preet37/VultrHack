@@ -59,18 +59,21 @@ class VultrInstances:
 
     async def create(self, region, plan, os_id, callback_url, ready_token):
         script = docker_user_data(callback_url, ready_token)
-        response = await self.client.post(
-            API_URL,
-            headers=self.headers,
-            json={
-                "region": region,
-                "plan": plan,
-                "os_id": os_id,
-                "label": f"cerberus-{uuid4().hex[:12]}",
-                "tags": ["cerberus"],
-                "user_data": base64.b64encode(script.encode()).decode(),
-            },
-        )
+        payload = {
+            "region": region,
+            "plan": plan,
+            "os_id": os_id,
+            "label": f"cerberus-{uuid4().hex[:12]}",
+            "tags": ["cerberus"],
+            "user_data": base64.b64encode(script.encode()).decode(),
+        }
+        response = await self.client.post(API_URL, headers=self.headers, json=payload)
+        if response.status_code == 400:
+            detail = str(response.json().get("error", "Invalid instance parameters"))
+            for secret in (self.headers["Authorization"][7:], ready_token, payload["user_data"]):
+                detail = detail.replace(secret, "[redacted]")
+            detail = detail.replace("\n", " ").replace("\r", " ")[:200]
+            raise ValueError(f"Vultr rejected instance configuration: {detail}")
         response.raise_for_status()
         return response.json()["instance"]["id"]
 

@@ -37,6 +37,22 @@ def test_create_uses_cloud_init_without_vultr_keys():
     assert "account-key" not in script
 
 
+def test_create_validation_error_redacts_credentials():
+    def respond(request):
+        return httpx.Response(400, json={"error": "Invalid os_id with account-key and ready-token"})
+
+    async def request():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            await VultrInstances(client, "account-key").create(
+                "ewr", "vc2-1c-1gb", 2284, "https://cerberus.example/internal/ready", "ready-token"
+            )
+
+    with pytest.raises(ValueError, match="Invalid os_id") as error:
+        asyncio.run(request())
+    assert "account-key" not in str(error.value)
+    assert "ready-token" not in str(error.value)
+
+
 def test_invalid_callback_is_rejected_before_provisioning():
     async def request():
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: pytest.fail("Network call"))) as client:
