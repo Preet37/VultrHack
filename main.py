@@ -1,13 +1,31 @@
+import asyncio
 import ipaddress
+import secrets
 from pathlib import Path
+from typing import Literal
 
-from fastapi import FastAPI, Header, HTTPException, Request, Response
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import FastAPI, Header, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from pydantic import BaseModel
 
 from instance_lifecycle import ReadySignals
+from jobs import JobRegistry, control_token
 
 app = FastAPI(title="Cerberus")
 ready_signals = ReadySignals()
+job_registry = JobRegistry()
+
+
+class JobRequest(BaseModel):
+    type: Literal["connectivity"]
+
+
+def require_control(authorization):
+    token = control_token()
+    if token is None:
+        raise HTTPException(status_code=503, detail="Control API is not configured")
+    if not authorization or not authorization.startswith("Bearer ") or not secrets.compare_digest(authorization[7:], token):
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
@@ -76,3 +94,62 @@ async def instance_ready(request: Request, authorization: str | None = Header(de
 
 callback_app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 callback_app.add_api_route("/internal/ready", instance_ready, methods=["POST"])
+
+
+@app.post("/jobs", status_code=202)
+async def start_job(request: JobRequest, authorization: str | None = Header(default=None)):
+    require_control(authorization)
+    job = job_registry.create()
+    if job is None:
+        raise HTTPException(status_code=429, detail="Too many active jobs")
+    return {"id": job.id, "type": request.type, "status": "queued"}
+
+
+@app.get("/jobs/{job_id}")
+async def job_status(job_id: str, authorization: str | None = Header(default=None)):
+    require_control(authorization)
+    job = job_registry.jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"id": job.id, "type": "connectivity", "status": job.status}
+
+
+@app.get("/jobs/{job_id}/result")
+async def job_result(job_id: str, authorization: str | None = Header(default=None)):
+    require_control(authorization)
+    job = job_registry.jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status == "failed":
+        return JSONResponse({"error": job.error}, status_code=502)
+    if job.status != "completed":
+        return JSONResponse({"status": job.status}, status_code=202)
+    return job.result
+
+
+@app.websocket("/jobs/{job_id}/events")
+async def job_events(websocket: WebSocket, job_id: str):
+    token = control_token()
+    if token is None:
+        await websocket.close(code=1013)
+        return
+    await websocket.accept()
+    try:
+        message = await asyncio.wait_for(websocket.receive_json(), timeout=5)
+    except WebSocketDisconnect:
+        return
+    except (ValueError, asyncio.TimeoutError):
+        await websocket.close(code=1008)
+        return
+    if not isinstance(message, dict) or not isinstance(message.get("token"), str) or not secrets.compare_digest(message["token"], token):
+        await websocket.close(code=1008)
+        return
+    job = job_registry.jobs.get(job_id)
+    if job is None:
+        await websocket.close(code=1008)
+        return
+    try:
+        async for event in job.stream():
+            await websocket.send_json(event)
+    except WebSocketDisconnect:
+        return

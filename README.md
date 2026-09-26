@@ -45,15 +45,15 @@ Each run consumes a fresh one-off key from `NETBIRD_SANDBOX_SETUP_KEY` in the ig
 
 ## What works today
 
-- FastAPI serves `/health`, a small logo landing page, and a token-protected `/internal/ready` callback. The lifecycle CLI launches a callback-only API without exposing the landing page or API docs through its tunnel.
+- FastAPI serves `/health`, a small logo landing page, and a token-protected `/internal/ready` callback. It now also offers token-protected job start/status/result routes and a WebSocket event stream for a read-only connectivity job. The lifecycle CLI launches a separate callback-only API without exposing the landing page or job routes through its tunnel.
 - `python -m connectivity` validates inference `/models` and the **authenticated** Vultr `/account` endpoint, then lists regions. A successful public `/regions` response alone does not prove the account key is valid.
 - The Vultr client can create, poll, and destroy a temporary instance; it confirms deletion via a 404. An earlier small Cloud Compute VM reached Docker readiness and was confirmed destroyed.
 - **VX1/gVisor host acceptance passed live in `ord`:** the host reported CPU virtualization `svm`, a readable and writable `/dev/kvm`, and Docker default runtime `runsc`. A restricted container returned its own hostname, `4.19.0-gvisor` `uname`, and exit code 0. The instance returned 404 after deletion, and no Cerberus-tagged instances remained.
 - An earlier full `ewr` VX1 stayed `pending` until timeout and was deleted. A minimal `ord` VX1 without cloud-init reached `active` quickly. This does not prove whether the earlier failure was due to region or bootstrap; no resources from either test remain.
 - OpenSandbox/gVisor smoke runs passed on disposable `ord` VX1 hosts using pinned server, SDK, and execd versions. A separate live NetBird smoke run reached the authenticated API from this Mac over the private peer address; the SDK destroyed the harmless sandbox before the VM was deleted. Zero Cerberus instances remained.
-- Tests cover configuration aliases, separation of keys, fail-closed VX1 plan selection, callback authentication and host-proof validation, cleanup on error paths, and OpenSandbox preflight.
+- Tests cover configuration aliases, separation of keys, fail-closed VX1 plan selection, callback authentication and host-proof validation, cleanup on error paths, OpenSandbox preflight, and control-API authentication, results, and event replay.
 
-Not yet built: the deployed VX1 control plane and its VX1-to-VX1 NetBird link, Next.js UI, dynamic repository execution, persistent OpenSandbox integration, network containment enforcement, automated remediation, or signed receipts. The current API does not expose job-start or WebSocket status endpoints.
+Not yet built: the deployed VX1 control plane and its VX1-to-VX1 NetBird link, Next.js UI, sandbox-backed jobs or dynamic repository execution, persistent OpenSandbox integration, network containment enforcement, automated remediation, or signed receipts. The current job API is local and read-only; it does not provision a VM.
 
 ## Demo acceptance targets
 
@@ -91,6 +91,16 @@ The OpenAI-compatible variables are reserved for later SDK calls; the current co
 ```
 
 `GET /` displays the Cerberus logo, and `GET /logo.jpg` serves the image for future clients. `GET /health` returns `{"status": "ok"}`. The connectivity command fetches `/v1/models`, verifies account-key access with `/v2/account`, and fetches `/v2/regions` before printing the successful statuses and available model IDs.
+
+## Local control API
+
+Set a separate `CERBERUS_CONTROL_TOKEN` of at least 32 random characters in the ignored, owner-only `.env`. Generate one locally with Python's `secrets.token_urlsafe(32)` and copy it using your editor; never reuse a Vultr key, commit the token, or embed it in a public frontend. Until it is configured, job endpoints return 503. REST calls require `Authorization: Bearer <control token>`.
+
+- `POST /jobs` with `{"type":"connectivity"}` returns 202 and a job ID. This is the only supported job type and performs read-only `/models`, `/account`, and `/regions` checks from the control process; it never runs repository code or creates instances.
+- `GET /jobs/{id}` reports `queued`, `running`, `completed`, or `failed`. `GET /jobs/{id}/result` returns 202 while pending, a successful model list and region count when complete, or a generic 502 on upstream failure. Upstream errors and tokens are not returned to clients.
+- `WS /jobs/{id}/events` replays earlier events and streams new ones. Authenticate with the **first WebSocket JSON message** `{"token":"<control token>"}`, not a URL query parameter. Use WSS if deployed remotely.
+
+Jobs and events are bounded and held **in memory only**: a process restart loses them, and this prototype is intended for one trusted local controller process. A public browser UI needs proper session authentication before it can safely use these endpoints.
 
 ## Temporary instance check
 
