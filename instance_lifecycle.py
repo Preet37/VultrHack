@@ -118,11 +118,20 @@ class VultrInstances:
                 raise TimeoutError(f"Instance {instance_id} did not become active")
             await asyncio.sleep(min(interval, remaining))
 
-    async def destroy(self, instance_id, timeout=120, interval=5):
+    async def destroy(self, instance_id, timeout=300, interval=5):
         url = f"{API_URL}/{instance_id}"
-        response = await self.client.delete(url, headers=self.headers)
-        response.raise_for_status()
         deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            response = await self.client.delete(url, headers=self.headers)
+            if response.status_code == 404:
+                return
+            if response.status_code != 409:
+                response.raise_for_status()
+                break
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TimeoutError(f"Instance {instance_id} could not be deleted while Vultr reports a conflict")
+            await asyncio.sleep(min(interval, remaining))
         while True:
             response = await self.client.get(url, headers=self.headers)
             if response.status_code == 404:

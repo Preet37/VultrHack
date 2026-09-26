@@ -143,6 +143,32 @@ def test_destroy_waits_until_instance_is_gone():
     assert methods == ["DELETE", "GET", "GET"]
 
 
+def test_destroy_retries_conflict_during_installation():
+    methods = []
+
+    def respond(request):
+        methods.append(request.method)
+        if request.method == "DELETE" and methods.count("DELETE") == 1:
+            return httpx.Response(409, json={"error": "Instance installing"})
+        return httpx.Response(204 if request.method == "DELETE" else 404)
+
+    async def request():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            await VultrInstances(client, "account-key").destroy("instance-123", interval=0)
+
+    asyncio.run(request())
+    assert methods == ["DELETE", "DELETE", "GET"]
+
+
+def test_destroy_reports_persistent_conflict_with_instance_id():
+    async def request():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(409))) as client:
+            await VultrInstances(client, "account-key").destroy("instance-123", timeout=0)
+
+    with pytest.raises(TimeoutError, match="instance-123"):
+        asyncio.run(request())
+
+
 def test_ready_callback_requires_registered_token_and_host_proof():
     proof = {
         "hostname": "vx1-test",
