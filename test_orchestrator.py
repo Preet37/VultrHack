@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 
 import httpx
 import pytest
@@ -17,6 +18,19 @@ def test_health():
     response = asyncio.run(request())
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_home_displays_logo():
+    async def request():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            return await client.get("/"), await client.get("/logo.jpg")
+
+    home, logo = asyncio.run(request())
+    assert home.status_code == 200
+    assert '<img src="/logo.jpg" alt="Cerberus logo"' in home.text
+    assert logo.status_code == 200
+    assert logo.headers["content-type"] == "image/jpeg"
+    assert logo.content == Path(__file__).with_name("cerberus-logo.jpg").read_bytes()
 
 
 def test_catalog_requests_use_separate_keys():

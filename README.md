@@ -1,5 +1,7 @@
 # Cerberus
 
+<img src="cerberus-logo.jpg" alt="Cerberus logo" width="240">
+
 A FastAPI orchestrator for isolated, defensive repository checks. The first milestone provides a health endpoint and a command to verify access to Vultr APIs without printing credentials.
 
 ## Local setup
@@ -19,7 +21,7 @@ Set `VULTR_API_KEY` and `VULTR_INFERENCE_KEY` in `.env` or your environment. The
 .venv/bin/python -m pytest -q
 ```
 
-`GET /health` returns `{"status": "ok"}`. The connectivity command fetches `/v1/models` and `/v2/regions`, then prints both successful statuses and the available model IDs.
+`GET /` displays the Cerberus logo, and `GET /logo.jpg` serves the image for future clients. `GET /health` returns `{"status": "ok"}`. The connectivity command fetches `/v1/models` and `/v2/regions`, then prints both successful statuses and the available model IDs.
 
 ## Temporary instance check
 
