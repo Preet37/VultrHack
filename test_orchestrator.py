@@ -40,6 +40,8 @@ def test_catalog_requests_use_separate_keys():
         requests.append(request)
         if request.url.path == "/v1/models":
             return httpx.Response(200, json={"data": [{"id": "example-model"}]})
+        if request.url.path == "/v2/account":
+            return httpx.Response(200, json={"account": {}})
         if request.url.path == "/v2/regions":
             return httpx.Response(200, json={"regions": [{"id": "ewr"}]})
         return httpx.Response(404)
@@ -51,12 +53,34 @@ def test_catalog_requests_use_separate_keys():
     assert asyncio.run(request()) == (["example-model"], 1)
     assert [str(request.url) for request in requests] == [
         "https://api.vultrinference.com/v1/models",
+        "https://api.vultr.com/v2/account",
         "https://api.vultr.com/v2/regions",
     ]
     assert [request.headers["authorization"] for request in requests] == [
         "Bearer inference-token",
         "Bearer account-token",
+        "Bearer account-token",
     ]
+
+
+def test_public_regions_cannot_mask_invalid_account_auth():
+    seen = []
+
+    def respond(request):
+        seen.append(request.url.path)
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "example-model"}]})
+        if request.url.path == "/v2/regions":
+            return httpx.Response(200, json={"regions": [{"id": "ewr"}]})
+        return httpx.Response(401, json={"error": "Unauthorized IP address"})
+
+    async def request():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            await check_connectivity(client, "account-token", "inference-token")
+
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(request())
+    assert "/v2/account" in seen
 
 
 def test_catalog_failure_does_not_print_keys(capsys):

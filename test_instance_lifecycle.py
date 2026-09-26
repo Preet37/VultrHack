@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from instance_lifecycle import ReadySignals, VultrInstances, temporary_instance
-from main import app, ready_signals
+from main import app, callback_app, ready_signals
 
 
 def test_create_uses_cloud_init_without_vultr_keys():
@@ -110,6 +110,21 @@ def test_ready_callback_requires_registered_token():
             ready_signals.unregister(token)
 
     asyncio.run(request())
+
+
+def test_temporary_callback_server_exposes_no_other_routes():
+    async def request():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=callback_app), base_url="http://test") as client:
+            return (
+                await client.get("/"),
+                await client.get("/docs"),
+                await client.get("/openapi.json"),
+                await client.get("/internal/ready"),
+                await client.post("/internal/ready"),
+            )
+
+    home, docs, schema, wrong_method, unauthorized = asyncio.run(request())
+    assert [response.status_code for response in (home, docs, schema, wrong_method, unauthorized)] == [404, 404, 404, 405, 404]
 
 
 def test_ready_timeout():

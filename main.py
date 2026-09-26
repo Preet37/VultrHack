@@ -35,3 +35,7 @@ async def instance_ready(authorization: str | None = Header(default=None)):
     if not authorization or not authorization.startswith("Bearer ") or not ready_signals.signal(authorization[7:]):
         raise HTTPException(status_code=404)
     return Response(status_code=204)
+
+
+callback_app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+callback_app.add_api_route("/internal/ready", instance_ready, methods=["POST"])

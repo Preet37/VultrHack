@@ -6,6 +6,7 @@ import httpx
 from dotenv import load_dotenv
 
 INFERENCE_URL = "https://api.vultrinference.com/v1/models"
+ACCOUNT_URL = "https://api.vultr.com/v2/account"
 REGIONS_URL = "https://api.vultr.com/v2/regions"
 
 
@@ -21,6 +22,8 @@ def load_keys():
 async def check_connectivity(client, api_key, inference_key):
     models_response = await client.get(INFERENCE_URL, headers={"Authorization": f"Bearer {inference_key}"})
     models_response.raise_for_status()
+    account_response = await client.get(ACCOUNT_URL, headers={"Authorization": f"Bearer {api_key}"})
+    account_response.raise_for_status()
     regions_response = await client.get(REGIONS_URL, headers={"Authorization": f"Bearer {api_key}"})
     regions_response.raise_for_status()
     return [model["id"] for model in models_response.json()["data"]], len(regions_response.json()["regions"])
@@ -31,6 +34,7 @@ async def main():
     async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
         models, region_count = await check_connectivity(client, api_key, inference_key)
     print("Inference GET /models: 200")
+    print("Vultr GET /account: 200")
     print("Vultr GET /regions: 200")
     print("Models:")
     for model in models:

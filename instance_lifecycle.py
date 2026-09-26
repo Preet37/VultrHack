@@ -117,14 +117,14 @@ async def verify_instance(callback_url, host, port, region, plan, os_id):
     import uvicorn
 
     from connectivity import load_keys
-    from main import app, ready_signals
+    from main import callback_app, ready_signals
 
     docker_user_data(callback_url, "validation")
     api_key, _ = load_keys()
     region = region or os.getenv("VULTR_REGION", "ewr")
     plan = plan or os.getenv("VULTR_PLAN", "vc2-1c-1gb")
     token = ready_signals.register()
-    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="warning", access_log=False))
+    server = uvicorn.Server(uvicorn.Config(callback_app, host=host, port=port, log_level="warning", access_log=False))
     server_task = asyncio.create_task(server.serve())
     try:
         while not server.started:
