@@ -8,6 +8,8 @@ from main import app
 
 
 def test_health():
+    assert app.title == "Cerberus"
+
     async def request():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             return await client.get("/health")
