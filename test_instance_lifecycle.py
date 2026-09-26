@@ -7,7 +7,7 @@ import subprocess
 import httpx
 import pytest
 
-from instance_lifecycle import ReadySignals, VultrInstances, docker_user_data, temporary_instance
+from instance_lifecycle import ReadySignals, VultrInstances, docker_user_data, temporary_instance, verify_instance
 from main import app, callback_app, ready_signals
 
 
@@ -56,6 +56,26 @@ def test_cloud_init_shell_and_host_proof_syntax():
     ast.parse(script.split("proof=$(python3 -c '", 1)[1].split("')\n", 1)[0])
 
 
+def test_netbird_key_is_not_replaced_by_vultr_credentials_in_user_data():
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(202, json={"instance": {"id": "instance-123"}})
+
+    async def request():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            await VultrInstances(client, "account-key").create(
+                "ord", "vx1-g-2c-8g-120s", 2284, "https://cerberus.example/internal/ready", "ready-token", True, "A" * 36
+            )
+
+    asyncio.run(request())
+    script = base64.b64decode(json.loads(requests[0].content)["user_data"]).decode()
+    assert script.count("A" * 36) == 1
+    assert "account-key" not in script
+    assert "netbird up --setup-key-file" in script
+
+
 def test_create_validation_error_redacts_credentials():
     def respond(request):
         return httpx.Response(400, json={"error": "Invalid os_id with account-key and ready-token"})
@@ -72,6 +92,21 @@ def test_create_validation_error_redacts_credentials():
     assert "ready-token" not in str(error.value)
 
 
+def test_netbird_setup_key_is_redacted_from_vultr_validation_errors():
+    def respond(request):
+        return httpx.Response(400, json={"error": "Invalid setup key " + "A" * 36})
+
+    async def request():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            await VultrInstances(client, "account-key").create(
+                "ord", "vx1-g-2c-8g-120s", 2284, "https://cerberus.example/internal/ready", "ready-token", True, "A" * 36
+            )
+
+    with pytest.raises(ValueError) as error:
+        asyncio.run(request())
+    assert "A" * 36 not in str(error.value)
+
+
 def test_non_vx1_or_diskless_plan_is_rejected_before_provisioning():
     async def request(plan):
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: pytest.fail("Network call"))) as client:
@@ -82,6 +117,24 @@ def test_non_vx1_or_diskless_plan_is_rejected_before_provisioning():
     for plan in ("vc2-1c-1gb", "vx1-g-2c-8g", "vx1-g-2c-8g-no-local-disks"):
         with pytest.raises(ValueError, match="VX1.*local"):
             asyncio.run(request(plan))
+
+
+def test_netbird_test_requires_local_setup_key_before_provisioning(monkeypatch):
+    monkeypatch.setattr("connectivity.load_keys", lambda: ("account-key", "inference-key"))
+    monkeypatch.delenv("NETBIRD_SANDBOX_SETUP_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="NETBIRD_SANDBOX_SETUP_KEY"):
+        asyncio.run(verify_instance("https://cerberus.example/internal/ready", "127.0.0.1", 8000, "ord", "vx1-g-2c-8g-120s", 2284, True, True))
+
+
+def test_netbird_test_rejects_open_env_permissions(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("placeholder")
+    env_file.chmod(0o644)
+    monkeypatch.setattr("instance_lifecycle.Path", lambda _: env_file)
+    monkeypatch.setattr("connectivity.load_keys", lambda: ("account-key", "inference-key"))
+    monkeypatch.setenv("NETBIRD_SANDBOX_SETUP_KEY", "A" * 36)
+    with pytest.raises(RuntimeError, match="chmod 600"):
+        asyncio.run(verify_instance("https://cerberus.example/internal/ready", "127.0.0.1", 8000, "ord", "vx1-g-2c-8g-120s", 2284, True, True))
 
 
 def test_invalid_callback_is_rejected_before_provisioning():
@@ -213,10 +266,12 @@ def test_ready_callback_rejects_invalid_opensandbox_result():
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=callback_app), base_url="http://test") as client:
                 headers = {"Authorization": f"Bearer {token}"}
                 invalid = await client.post("/internal/ready", headers=headers, json={**proof, "opensandbox": {"hostname": "sandbox", "uname": "Linux", "exit_code": 1}})
-                valid = await client.post("/internal/ready", headers=headers, json={**proof, "opensandbox": {"hostname": "sandbox", "uname": "Linux", "exit_code": 0}})
+                public_ip = await client.post("/internal/ready", headers=headers, json={**proof, "netbird_ip": "192.0.2.1"})
+                valid = await client.post("/internal/ready", headers=headers, json={**proof, "opensandbox": {"hostname": "sandbox", "uname": "Linux", "exit_code": 0}, "netbird_ip": "100.124.192.2"})
             assert invalid.status_code == 400
+            assert public_ip.status_code == 400
             assert valid.status_code == 204
-            assert (await ready_signals.wait(token, timeout=0.1))["opensandbox"]["exit_code"] == 0
+            assert (await ready_signals.wait(token, timeout=0.1))["netbird_ip"] == "100.124.192.2"
         finally:
             ready_signals.unregister(token)
 

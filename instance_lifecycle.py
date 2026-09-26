@@ -6,6 +6,7 @@ import re
 import secrets
 import shlex
 from contextlib import asynccontextmanager
+from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -43,7 +44,9 @@ class ReadySignals:
         self._proofs.pop(token, None)
 
 
-def docker_user_data(callback_url, ready_token, opensandbox_spike=False):
+def docker_user_data(callback_url, ready_token, opensandbox_spike=False, netbird_setup_key=None):
+    if netbird_setup_key is not None and not opensandbox_spike:
+        raise ValueError("NetBird enrollment requires the authenticated OpenSandbox spike")
     url = urlsplit(callback_url)
     if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment:
         raise ValueError("Ready callback must be a public HTTPS URL without credentials or a query string")
@@ -72,10 +75,14 @@ def docker_user_data(callback_url, ready_token, opensandbox_spike=False):
         "test \"$(docker info --format '{{.DefaultRuntime}}')\" = runsc\n"
         "proof=$(python3 -c 'import json,os,platform,re; flags=open(\"/proc/cpuinfo\").read(); cpu=re.search(r\"\\b(vmx|svm)\\b\",flags).group(1); sandbox=os.environ[\"SANDBOX_OUTPUT\"].splitlines(); print(json.dumps({\"hostname\":platform.node(),\"uname\":\" \".join(os.uname()),\"cpu_virt\":cpu,\"kvm_device\":os.path.exists(\"/dev/kvm\"),\"kvm_access\":os.access(\"/dev/kvm\",os.R_OK|os.W_OK),\"runtime\":\"runsc\",\"sandbox_hostname\":sandbox[0],\"sandbox_uname\":sandbox[1],\"exit_code\":0}))')\n"
     )
+    if netbird_setup_key is not None:
+        from sandbox_platform import netbird_enrollment_user_data
+
+        script += netbird_enrollment_user_data(netbird_setup_key)
     if opensandbox_spike:
         from sandbox_platform import opensandbox_spike_user_data
 
-        script += opensandbox_spike_user_data()
+        script += opensandbox_spike_user_data(netbird=netbird_setup_key is not None)
     return script + (
         f"curl --fail --silent --show-error --retry 12 --retry-delay 5 --max-time 15 -X POST "
         f"-H {shlex.quote(f'Authorization: Bearer {ready_token}')} -H 'Content-Type: application/json' "
@@ -88,10 +95,10 @@ class VultrInstances:
         self.client = client
         self.headers = {"Authorization": f"Bearer {api_key}"}
 
-    async def create(self, region, plan, os_id, callback_url, ready_token, opensandbox_spike=False):
+    async def create(self, region, plan, os_id, callback_url, ready_token, opensandbox_spike=False, netbird_setup_key=None):
         if not plan.startswith("vx1-") or not re.search(r"-\d+s$", plan):
             raise ValueError("A VX1 plan with local NVMe storage is required")
-        script = docker_user_data(callback_url, ready_token, opensandbox_spike)
+        script = docker_user_data(callback_url, ready_token, opensandbox_spike, netbird_setup_key)
         payload = {
             "region": region,
             "plan": plan,
@@ -104,8 +111,9 @@ class VultrInstances:
         response = await self.client.post(API_URL, headers=self.headers, json=payload)
         if response.status_code == 400:
             detail = str(response.json().get("error", "Invalid instance parameters"))
-            for secret in (self.headers["Authorization"][7:], ready_token, payload["user_data"]):
-                detail = detail.replace(secret, "[redacted]")
+            for secret in (self.headers["Authorization"][7:], ready_token, payload["user_data"], netbird_setup_key):
+                if secret:
+                    detail = detail.replace(secret, "[redacted]")
             detail = detail.replace("\n", " ").replace("\r", " ")[:200]
             raise ValueError(f"Vultr rejected instance configuration: {detail}")
         response.raise_for_status()
@@ -150,23 +158,29 @@ class VultrInstances:
 
 
 @asynccontextmanager
-async def temporary_instance(api, region, plan, os_id, callback_url, ready_token, opensandbox_spike=False):
-    instance_id = await api.create(region, plan, os_id, callback_url, ready_token, opensandbox_spike)
+async def temporary_instance(api, region, plan, os_id, callback_url, ready_token, opensandbox_spike=False, netbird_setup_key=None):
+    instance_id = await api.create(region, plan, os_id, callback_url, ready_token, opensandbox_spike, netbird_setup_key)
     try:
         yield instance_id
     finally:
         await api.destroy(instance_id)
 
 
-async def verify_instance(callback_url, host, port, region, plan, os_id, opensandbox_spike=False):
+async def verify_instance(callback_url, host, port, region, plan, os_id, opensandbox_spike=False, netbird_test=False):
     import httpx
     import uvicorn
 
     from connectivity import load_keys
     from main import callback_app, ready_signals
 
-    docker_user_data(callback_url, "validation", opensandbox_spike)
     api_key, _ = load_keys()
+    setup_key = os.getenv("NETBIRD_SANDBOX_SETUP_KEY") if netbird_test else None
+    if netbird_test and not setup_key:
+        raise RuntimeError("Set NETBIRD_SANDBOX_SETUP_KEY in the ignored .env before enrollment")
+    env_file = Path(__file__).with_name(".env")
+    if netbird_test and env_file.exists() and env_file.stat().st_mode & 0o077:
+        raise RuntimeError("Restrict .env to its owner (chmod 600 .env) before NetBird enrollment")
+    docker_user_data(callback_url, "validation", opensandbox_spike, setup_key)
     region = region or os.getenv("VULTR_REGION", "ewr")
     plan = plan or os.getenv("VULTR_PLAN", DEFAULT_VX1_PLAN)
     token = ready_signals.register()
@@ -180,7 +194,7 @@ async def verify_instance(callback_url, host, port, region, plan, os_id, opensan
             await asyncio.sleep(0.1)
         async with httpx.AsyncClient(timeout=60) as client:
             api = VultrInstances(client, api_key)
-            async with temporary_instance(api, region, plan, os_id, callback_url, token, opensandbox_spike) as instance_id:
+            async with temporary_instance(api, region, plan, os_id, callback_url, token, opensandbox_spike, setup_key) as instance_id:
                 print(f"Created instance {instance_id}")
                 await api.wait_active(instance_id)
                 print(f"Instance {instance_id} active; waiting for Docker readiness")
@@ -190,6 +204,11 @@ async def verify_instance(callback_url, host, port, region, plan, os_id, opensan
                 print(f"Sandbox output: {proof['sandbox_hostname']} | {proof['sandbox_uname']} | exit code: {proof['exit_code']}")
                 if opensandbox_spike:
                     print(f"OpenSandbox output: {proof['opensandbox']['hostname']} | {proof['opensandbox']['uname']} | exit code: {proof['opensandbox']['exit_code']}")
+                if netbird_test:
+                    from sandbox_platform import check_private_endpoint
+
+                    await check_private_endpoint(client, proof["netbird_ip"])
+                    print("NetBird private OpenSandbox health and authentication checks passed")
                 print(f"Instance {instance_id} healthy; destroying it")
             print(f"Instance {instance_id} confirmed destroyed")
     finally:
@@ -206,12 +225,15 @@ def main():
     parser.add_argument("--region")
     parser.add_argument("--plan")
     parser.add_argument("--os-id", type=int, default=2284)
-    parser.add_argument("--opensandbox-spike", action="store_true", help="Run a local-only OpenSandbox gVisor smoke check")
+    parser.add_argument("--opensandbox-spike", action="store_true", help="Run a local OpenSandbox gVisor smoke check")
+    parser.add_argument("--netbird-test", action="store_true", help="Enroll one NetBird peer and check the private API")
     parser.add_argument("--execute", action="store_true", help="Authorize instance creation and subsequent destruction")
     args = parser.parse_args()
     if not args.execute:
         parser.error("Pass --execute to authorize creating and destroying one instance")
-    asyncio.run(verify_instance(args.callback_url, args.host, args.port, args.region, args.plan, args.os_id, args.opensandbox_spike))
+    if args.netbird_test and not args.opensandbox_spike:
+        parser.error("--netbird-test requires --opensandbox-spike")
+    asyncio.run(verify_instance(args.callback_url, args.host, args.port, args.region, args.plan, args.os_id, args.opensandbox_spike, args.netbird_test))
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+import ipaddress
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response
@@ -60,6 +61,13 @@ async def instance_ready(request: Request, authorization: str | None = Header(de
             or type(extra.get("exit_code")) is not int
             or extra["exit_code"] != 0
         ):
+            raise HTTPException(status_code=400)
+    if "netbird_ip" in proof:
+        try:
+            address = ipaddress.ip_address(proof["netbird_ip"])
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400)
+        if address not in ipaddress.ip_network("100.64.0.0/10"):
             raise HTTPException(status_code=400)
     if not ready_signals.signal(token, proof):
         raise HTTPException(status_code=404)
