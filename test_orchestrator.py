@@ -99,11 +99,20 @@ def test_catalog_failure_does_not_print_keys(capsys):
 def test_load_keys_supports_documented_and_existing_env_names(monkeypatch):
     monkeypatch.setattr("connectivity.load_dotenv", lambda _: None)
     monkeypatch.setenv("VULTR_API_KEY", "account")
-    monkeypatch.setenv("VULTR_INFERENCE_KEY", "inference")
+    monkeypatch.setenv("VULTR_INFERENCE_KEY", "legacy-inference")
+    monkeypatch.setenv("VULTR_INFERENCE_API_KEY", "inference")
     assert load_keys() == ("account", "inference")
+
+    monkeypatch.delenv("VULTR_INFERENCE_API_KEY")
+    assert load_keys() == ("account", "legacy-inference")
 
     monkeypatch.delenv("VULTR_API_KEY")
     monkeypatch.delenv("VULTR_INFERENCE_KEY")
     monkeypatch.setenv("vultr_api_key", "legacy-account")
     monkeypatch.setenv("vultr_inference_api_key", "legacy-inference")
     assert load_keys() == ("legacy-account", "legacy-inference")
+
+    monkeypatch.delenv("vultr_inference_api_key")
+    monkeypatch.setenv("OPENAI_API_KEY", "external-key")
+    with pytest.raises(RuntimeError):
+        load_keys()

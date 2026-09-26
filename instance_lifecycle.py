@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import base64
 import os
+import re
 import secrets
 import shlex
 from contextlib import asynccontextmanager
@@ -9,29 +10,37 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 API_URL = "https://api.vultr.com/v2/instances"
+DEFAULT_VX1_PLAN = "vx1-g-2c-8g-120s"
 
 
 class ReadySignals:
     def __init__(self):
         self._events = {}
+        self._proofs = {}
 
     def register(self):
         token = secrets.token_urlsafe(32)
         self._events[token] = asyncio.Event()
         return token
 
-    def signal(self, token):
+    def has(self, token):
+        return token in self._events
+
+    def signal(self, token, proof):
         event = self._events.get(token)
         if event is None:
             return False
+        self._proofs[token] = proof
         event.set()
         return True
 
     async def wait(self, token, timeout=600):
         await asyncio.wait_for(self._events[token].wait(), timeout)
+        return self._proofs[token]
 
     def unregister(self, token):
         self._events.pop(token, None)
+        self._proofs.pop(token, None)
 
 
 def docker_user_data(callback_url, ready_token):
@@ -43,12 +52,28 @@ def docker_user_data(callback_url, ready_token):
     return (
         "#!/bin/sh\n"
         "set -eu\n"
+        "test -c /dev/kvm\n"
+        "test -r /dev/kvm\n"
+        "test -w /dev/kvm\n"
+        "grep -Eq '(vmx|svm)' /proc/cpuinfo\n"
         "export DEBIAN_FRONTEND=noninteractive\n"
         "apt-get update\n"
-        "apt-get install -y docker.io curl\n"
+        "apt-get install -y docker.io curl ca-certificates gnupg\n"
         "systemctl enable --now docker\n"
+        "curl -fsSL https://gvisor.dev/archive.key | gpg --batch --yes --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg\n"
+        "printf '%s\\n' \"deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main\" > /etc/apt/sources.list.d/gvisor.list\n"
+        "apt-get update\n"
+        "apt-get install -y runsc\n"
+        "runsc install\n"
+        "python3 -c 'import json; from pathlib import Path; p=Path(\"/etc/docker/daemon.json\"); config=json.loads(p.read_text()); config[\"default-runtime\"]=\"runsc\"; p.write_text(json.dumps(config))'\n"
+        "systemctl restart docker\n"
+        "sandbox_output=$(docker run --rm --runtime=runsc --network=none --read-only --cap-drop=ALL --pids-limit=32 busybox:1.37.0 sh -c 'hostname; uname -a')\n"
+        "export SANDBOX_OUTPUT=\"$sandbox_output\"\n"
+        "test \"$(docker info --format '{{.DefaultRuntime}}')\" = runsc\n"
+        "proof=$(python3 -c 'import json,os,platform,re; flags=open(\"/proc/cpuinfo\").read(); cpu=re.search(r\"\\b(vmx|svm)\\b\",flags).group(1); sandbox=os.environ[\"SANDBOX_OUTPUT\"].splitlines(); print(json.dumps({\"hostname\":platform.node(),\"uname\":\" \".join(os.uname()),\"cpu_virt\":cpu,\"kvm_device\":os.path.exists(\"/dev/kvm\"),\"kvm_access\":os.access(\"/dev/kvm\",os.R_OK|os.W_OK),\"runtime\":\"runsc\",\"sandbox_hostname\":sandbox[0],\"sandbox_uname\":sandbox[1],\"exit_code\":0}))')\n"
         f"curl --fail --silent --show-error --retry 12 --retry-delay 5 --max-time 15 -X POST "
-        f"-H {shlex.quote(f'Authorization: Bearer {ready_token}')} {shlex.quote(callback_url)}\n"
+        f"-H {shlex.quote(f'Authorization: Bearer {ready_token}')} -H 'Content-Type: application/json' "
+        f"--data-binary \"$proof\" {shlex.quote(callback_url)}\n"
     )
 
 
@@ -58,11 +83,14 @@ class VultrInstances:
         self.headers = {"Authorization": f"Bearer {api_key}"}
 
     async def create(self, region, plan, os_id, callback_url, ready_token):
+        if not plan.startswith("vx1-") or not re.search(r"-\d+s$", plan):
+            raise ValueError("A VX1 plan with local NVMe storage is required")
         script = docker_user_data(callback_url, ready_token)
         payload = {
             "region": region,
             "plan": plan,
             "os_id": os_id,
+            "block_devices": [{"block_id": "local", "bootable": True}],
             "label": f"cerberus-{uuid4().hex[:12]}",
             "tags": ["cerberus"],
             "user_data": base64.b64encode(script.encode()).decode(),
@@ -125,7 +153,7 @@ async def verify_instance(callback_url, host, port, region, plan, os_id):
     docker_user_data(callback_url, "validation")
     api_key, _ = load_keys()
     region = region or os.getenv("VULTR_REGION", "ewr")
-    plan = plan or os.getenv("VULTR_PLAN", "vc2-1c-1gb")
+    plan = plan or os.getenv("VULTR_PLAN", DEFAULT_VX1_PLAN)
     token = ready_signals.register()
     server = uvicorn.Server(uvicorn.Config(callback_app, host=host, port=port, log_level="warning", access_log=False))
     server_task = asyncio.create_task(server.serve())
@@ -141,7 +169,10 @@ async def verify_instance(callback_url, host, port, region, plan, os_id):
                 print(f"Created instance {instance_id}")
                 await api.wait_active(instance_id)
                 print(f"Instance {instance_id} active; waiting for Docker readiness")
-                await ready_signals.wait(token)
+                proof = await ready_signals.wait(token)
+                print(f"Host proof: {proof['hostname']} | {proof['uname']}")
+                print(f"CPU virt: {proof['cpu_virt']} | /dev/kvm: {proof['kvm_device']} | read/write: {proof['kvm_access']} | Docker runtime: {proof['runtime']}")
+                print(f"Sandbox output: {proof['sandbox_hostname']} | {proof['sandbox_uname']} | exit code: {proof['exit_code']}")
                 print(f"Instance {instance_id} healthy; destroying it")
             print(f"Instance {instance_id} confirmed destroyed")
     finally:

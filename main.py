@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from fastapi import FastAPI, Header, HTTPException, Response
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse
 
 from instance_lifecycle import ReadySignals
@@ -31,8 +31,28 @@ def health():
 
 
 @app.post("/internal/ready")
-async def instance_ready(authorization: str | None = Header(default=None)):
-    if not authorization or not authorization.startswith("Bearer ") or not ready_signals.signal(authorization[7:]):
+async def instance_ready(request: Request, authorization: str | None = Header(default=None)):
+    token = authorization[7:] if authorization and authorization.startswith("Bearer ") else ""
+    if not ready_signals.has(token):
+        raise HTTPException(status_code=404)
+    if len(await request.body()) > 2048:
+        raise HTTPException(status_code=413)
+    try:
+        proof = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400)
+    if (
+        not isinstance(proof, dict)
+        or any(not isinstance(proof.get(field), str) or not proof[field] or len(proof[field]) > 256 or not proof[field].isprintable() for field in ("hostname", "uname", "sandbox_hostname", "sandbox_uname"))
+        or proof.get("cpu_virt") not in ("vmx", "svm")
+        or proof.get("kvm_device") is not True
+        or proof.get("kvm_access") is not True
+        or proof.get("runtime") != "runsc"
+        or type(proof.get("exit_code")) is not int
+        or proof["exit_code"] != 0
+    ):
+        raise HTTPException(status_code=400)
+    if not ready_signals.signal(token, proof):
         raise HTTPException(status_code=404)
     return Response(status_code=204)
 

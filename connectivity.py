@@ -13,9 +13,9 @@ REGIONS_URL = "https://api.vultr.com/v2/regions"
 def load_keys():
     load_dotenv(Path(__file__).with_name(".env"))
     api_key = os.getenv("VULTR_API_KEY") or os.getenv("vultr_api_key")
-    inference_key = os.getenv("VULTR_INFERENCE_KEY") or os.getenv("vultr_inference_api_key")
+    inference_key = os.getenv("VULTR_INFERENCE_API_KEY") or os.getenv("VULTR_INFERENCE_KEY") or os.getenv("vultr_inference_api_key")
     if not api_key or not inference_key:
-        raise RuntimeError("Set VULTR_API_KEY and VULTR_INFERENCE_KEY in .env or the environment")
+        raise RuntimeError("Set VULTR_API_KEY and VULTR_INFERENCE_API_KEY in .env or the environment")
     return api_key, inference_key
 
 
