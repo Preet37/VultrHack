@@ -52,6 +52,15 @@ async def instance_ready(request: Request, authorization: str | None = Header(de
         or proof["exit_code"] != 0
     ):
         raise HTTPException(status_code=400)
+    if "opensandbox" in proof:
+        extra = proof["opensandbox"]
+        if (
+            not isinstance(extra, dict)
+            or any(not isinstance(extra.get(field), str) or not extra[field] or len(extra[field]) > 256 or not extra[field].isprintable() for field in ("hostname", "uname"))
+            or type(extra.get("exit_code")) is not int
+            or extra["exit_code"] != 0
+        ):
+            raise HTTPException(status_code=400)
     if not ready_signals.signal(token, proof):
         raise HTTPException(status_code=404)
     return Response(status_code=204)

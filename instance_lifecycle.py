@@ -43,13 +43,13 @@ class ReadySignals:
         self._proofs.pop(token, None)
 
 
-def docker_user_data(callback_url, ready_token):
+def docker_user_data(callback_url, ready_token, opensandbox_spike=False):
     url = urlsplit(callback_url)
     if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment:
         raise ValueError("Ready callback must be a public HTTPS URL without credentials or a query string")
     if not ready_token:
         raise ValueError("Ready token is required")
-    return (
+    script = (
         "#!/bin/sh\n"
         "set -eu\n"
         "test -c /dev/kvm\n"
@@ -71,6 +71,12 @@ def docker_user_data(callback_url, ready_token):
         "export SANDBOX_OUTPUT=\"$sandbox_output\"\n"
         "test \"$(docker info --format '{{.DefaultRuntime}}')\" = runsc\n"
         "proof=$(python3 -c 'import json,os,platform,re; flags=open(\"/proc/cpuinfo\").read(); cpu=re.search(r\"\\b(vmx|svm)\\b\",flags).group(1); sandbox=os.environ[\"SANDBOX_OUTPUT\"].splitlines(); print(json.dumps({\"hostname\":platform.node(),\"uname\":\" \".join(os.uname()),\"cpu_virt\":cpu,\"kvm_device\":os.path.exists(\"/dev/kvm\"),\"kvm_access\":os.access(\"/dev/kvm\",os.R_OK|os.W_OK),\"runtime\":\"runsc\",\"sandbox_hostname\":sandbox[0],\"sandbox_uname\":sandbox[1],\"exit_code\":0}))')\n"
+    )
+    if opensandbox_spike:
+        from sandbox_platform import opensandbox_spike_user_data
+
+        script += opensandbox_spike_user_data()
+    return script + (
         f"curl --fail --silent --show-error --retry 12 --retry-delay 5 --max-time 15 -X POST "
         f"-H {shlex.quote(f'Authorization: Bearer {ready_token}')} -H 'Content-Type: application/json' "
         f"--data-binary \"$proof\" {shlex.quote(callback_url)}\n"
@@ -82,10 +88,10 @@ class VultrInstances:
         self.client = client
         self.headers = {"Authorization": f"Bearer {api_key}"}
 
-    async def create(self, region, plan, os_id, callback_url, ready_token):
+    async def create(self, region, plan, os_id, callback_url, ready_token, opensandbox_spike=False):
         if not plan.startswith("vx1-") or not re.search(r"-\d+s$", plan):
             raise ValueError("A VX1 plan with local NVMe storage is required")
-        script = docker_user_data(callback_url, ready_token)
+        script = docker_user_data(callback_url, ready_token, opensandbox_spike)
         payload = {
             "region": region,
             "plan": plan,
@@ -144,22 +150,22 @@ class VultrInstances:
 
 
 @asynccontextmanager
-async def temporary_instance(api, region, plan, os_id, callback_url, ready_token):
-    instance_id = await api.create(region, plan, os_id, callback_url, ready_token)
+async def temporary_instance(api, region, plan, os_id, callback_url, ready_token, opensandbox_spike=False):
+    instance_id = await api.create(region, plan, os_id, callback_url, ready_token, opensandbox_spike)
     try:
         yield instance_id
     finally:
         await api.destroy(instance_id)
 
 
-async def verify_instance(callback_url, host, port, region, plan, os_id):
+async def verify_instance(callback_url, host, port, region, plan, os_id, opensandbox_spike=False):
     import httpx
     import uvicorn
 
     from connectivity import load_keys
     from main import callback_app, ready_signals
 
-    docker_user_data(callback_url, "validation")
+    docker_user_data(callback_url, "validation", opensandbox_spike)
     api_key, _ = load_keys()
     region = region or os.getenv("VULTR_REGION", "ewr")
     plan = plan or os.getenv("VULTR_PLAN", DEFAULT_VX1_PLAN)
@@ -174,7 +180,7 @@ async def verify_instance(callback_url, host, port, region, plan, os_id):
             await asyncio.sleep(0.1)
         async with httpx.AsyncClient(timeout=60) as client:
             api = VultrInstances(client, api_key)
-            async with temporary_instance(api, region, plan, os_id, callback_url, token) as instance_id:
+            async with temporary_instance(api, region, plan, os_id, callback_url, token, opensandbox_spike) as instance_id:
                 print(f"Created instance {instance_id}")
                 await api.wait_active(instance_id)
                 print(f"Instance {instance_id} active; waiting for Docker readiness")
@@ -182,6 +188,8 @@ async def verify_instance(callback_url, host, port, region, plan, os_id):
                 print(f"Host proof: {proof['hostname']} | {proof['uname']}")
                 print(f"CPU virt: {proof['cpu_virt']} | /dev/kvm: {proof['kvm_device']} | read/write: {proof['kvm_access']} | Docker runtime: {proof['runtime']}")
                 print(f"Sandbox output: {proof['sandbox_hostname']} | {proof['sandbox_uname']} | exit code: {proof['exit_code']}")
+                if opensandbox_spike:
+                    print(f"OpenSandbox output: {proof['opensandbox']['hostname']} | {proof['opensandbox']['uname']} | exit code: {proof['opensandbox']['exit_code']}")
                 print(f"Instance {instance_id} healthy; destroying it")
             print(f"Instance {instance_id} confirmed destroyed")
     finally:
@@ -198,11 +206,12 @@ def main():
     parser.add_argument("--region")
     parser.add_argument("--plan")
     parser.add_argument("--os-id", type=int, default=2284)
+    parser.add_argument("--opensandbox-spike", action="store_true", help="Run a local-only OpenSandbox gVisor smoke check")
     parser.add_argument("--execute", action="store_true", help="Authorize instance creation and subsequent destruction")
     args = parser.parse_args()
     if not args.execute:
         parser.error("Pass --execute to authorize creating and destroying one instance")
-    asyncio.run(verify_instance(args.callback_url, args.host, args.port, args.region, args.plan, args.os_id))
+    asyncio.run(verify_instance(args.callback_url, args.host, args.port, args.region, args.plan, args.os_id, args.opensandbox_spike))
 
 
 if __name__ == "__main__":

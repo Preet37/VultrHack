@@ -200,6 +200,29 @@ def test_ready_callback_requires_registered_token_and_host_proof():
     asyncio.run(request())
 
 
+def test_ready_callback_rejects_invalid_opensandbox_result():
+    proof = {
+        "hostname": "vx1-test", "uname": "Linux vx1-test x86_64", "cpu_virt": "vmx",
+        "kvm_device": True, "kvm_access": True, "runtime": "runsc",
+        "sandbox_hostname": "sandbox-test", "sandbox_uname": "Linux sandbox-test x86_64", "exit_code": 0,
+    }
+
+    async def request():
+        token = ready_signals.register()
+        try:
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=callback_app), base_url="http://test") as client:
+                headers = {"Authorization": f"Bearer {token}"}
+                invalid = await client.post("/internal/ready", headers=headers, json={**proof, "opensandbox": {"hostname": "sandbox", "uname": "Linux", "exit_code": 1}})
+                valid = await client.post("/internal/ready", headers=headers, json={**proof, "opensandbox": {"hostname": "sandbox", "uname": "Linux", "exit_code": 0}})
+            assert invalid.status_code == 400
+            assert valid.status_code == 204
+            assert (await ready_signals.wait(token, timeout=0.1))["opensandbox"]["exit_code"] == 0
+        finally:
+            ready_signals.unregister(token)
+
+    asyncio.run(request())
+
+
 def test_temporary_callback_server_exposes_no_other_routes():
     async def request():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=callback_app), base_url="http://test") as client:
