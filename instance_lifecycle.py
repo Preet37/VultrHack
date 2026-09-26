@@ -172,7 +172,7 @@ async def verify_instance(callback_url, host, port, region, plan, os_id):
                 await server_task
                 raise RuntimeError("Callback server did not start")
             await asyncio.sleep(0.1)
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(timeout=60) as client:
             api = VultrInstances(client, api_key)
             async with temporary_instance(api, region, plan, os_id, callback_url, token) as instance_id:
                 print(f"Created instance {instance_id}")

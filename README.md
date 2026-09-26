@@ -40,15 +40,16 @@ flowchart LR
 - FastAPI serves `/health`, a small logo landing page, and a token-protected `/internal/ready` callback. The lifecycle CLI launches a callback-only API without exposing the landing page or API docs through its tunnel.
 - `python -m connectivity` validates inference `/models` and the **authenticated** Vultr `/account` endpoint, then lists regions. A successful public `/regions` response alone does not prove the account key is valid.
 - The Vultr client can create, poll, and destroy a temporary instance; it confirms deletion via a 404. An earlier small Cloud Compute VM reached Docker readiness and was confirmed destroyed.
-- VX1/gVisor host-check code and mocked tests exist, but **live VX1 host acceptance has not passed**. A full `ewr` VX1 stayed `pending` until timeout and was deleted. A separate minimal `ord` VX1 with no cloud-init reached `active` immediately; deletion initially returned 409 during installation, then succeeded after the server reached `ok`. Both IDs returned 404 afterward, with zero Cerberus-tagged instances remaining. Neither run produced `/dev/kvm` or gVisor proof.
+- **VX1/gVisor host acceptance passed live in `ord`:** the host reported CPU virtualization `svm`, a readable and writable `/dev/kvm`, and Docker default runtime `runsc`. A restricted container returned its own hostname, `4.19.0-gvisor` `uname`, and exit code 0. The instance returned 404 after deletion, and no Cerberus-tagged instances remained.
+- An earlier full `ewr` VX1 stayed `pending` until timeout and was deleted. A minimal `ord` VX1 without cloud-init reached `active` quickly. This does not prove whether the earlier failure was due to region or bootstrap; no resources from either test remain.
 - Tests cover configuration aliases, separation of keys, fail-closed VX1 plan selection, callback authentication and host-proof validation, and cleanup on error paths.
 
 Not yet built: the deployed VX1 control plane, NetBird peer-to-peer link, Next.js UI, dynamic repository execution, OpenSandbox integration, network containment enforcement, automated remediation, or signed receipts. The current API does not expose job-start or WebSocket status endpoints.
 
 ## Demo acceptance targets
 
-- Show CPU virtualization, `/dev/kvm` presence and read/write access on the VX1 sandbox host. **Pending a live VX1 host check.**
-- Show real container stdout, exit code, and container-owned hostname/`uname`. **The bootstrap captures hostname/`uname` and reports zero after a successful smoke command; general exit-code capture and live VX1 proof are pending.**
+- Show CPU virtualization, `/dev/kvm` presence and read/write access on the VX1 sandbox host. **Passed in `ord`.**
+- Show real container stdout, exit code, and container-owned hostname/`uname`. **The restricted gVisor smoke container passed in `ord`; general per-job output and failure exit-code capture remain planned.**
 - Show an isolation decision backed by an enforcement log, not merely an application message. **Not built.**
 - Tear down containers and hosts and verify nothing remains. **Instance deletion and absence have been verified; container-level teardown remains planned.**
 
@@ -68,7 +69,7 @@ VULTR_API_KEY=your-account-token
 VULTR_INFERENCE_API_KEY=your-inference-token
 OPENAI_BASE_URL=https://api.vultrinference.com/v1
 OPENAI_API_KEY=${VULTR_INFERENCE_API_KEY}
-VULTR_REGION=ewr
+VULTR_REGION=ord
 VULTR_PLAN=vx1-g-2c-8g-120s
 ```
 
@@ -89,9 +90,9 @@ The lifecycle command provisions one Ubuntu 24.04 VX1 instance with local NVMe, 
 Provide a publicly reachable HTTPS URL that forwards `/internal/ready` to port 8000 of the machine running the command. Stop any other server using that port first. The command opens a callback-only server (no home page, docs, or other API routes), and `--execute` is required because this creates a billable VM and deletes it afterward:
 
 ```sh
-.venv/bin/python -m instance_lifecycle --callback-url https://YOUR-HTTPS-HOST/internal/ready --execute
+.venv/bin/python -m instance_lifecycle --callback-url https://YOUR-HTTPS-HOST/internal/ready --region ord --plan vx1-g-2c-8g-120s --execute
 ```
 
-The default region is `ewr`, VX1 plan `vx1-g-2c-8g-120s` (with local NVMe), and OS ID `2284`. Override region and plan via `VULTR_REGION` and `VULTR_PLAN` in `.env` or use `--region` and `--plan`. Plans without VX1 local storage are rejected before provisioning. The application name and API title are Cerberus; this does not rename the GitHub repository or your local directory.
+The code defaults to region `ewr`, VX1 plan `vx1-g-2c-8g-120s` (with local NVMe), and OS ID `2284`, but the successful live host check used `ord`. Pass `--region ord` or set `VULTR_REGION=ord` as shown above. Override the plan with `--plan` or `VULTR_PLAN`; plans without VX1 local storage are rejected before provisioning. The application name and API title are Cerberus; this does not rename the GitHub repository or your local directory.
 
 For this local smoke check, run `cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8000` in another terminal. Append `/internal/ready` to the HTTPS URL it prints, then stop the tunnel when the check finishes. The intended two-VX1 architecture uses NetBird for the private control plane; that integration has not been built yet.
