@@ -13,7 +13,7 @@ from connectivity import check_connectivity, load_keys
 TERMINAL = {"completed", "failed"}
 SECRET_NAMES = (
     "VULTR_API_KEY", "vultr_api_key", "VULTR_INFERENCE_API_KEY", "VULTR_INFERENCE_KEY",
-    "vultr_inference_api_key", "OPENAI_API_KEY", "NETBIRD_SANDBOX_SETUP_KEY",
+    "vultr_inference_api_key", "OPENAI_API_KEY", "NETBIRD_SANDBOX_SETUP_KEY", "NETBIRD_CONTROL_SETUP_KEY",
 )
 
 

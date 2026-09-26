@@ -42,6 +42,9 @@ def test_jobs_require_a_separate_strong_control_token(monkeypatch):
         monkeypatch.setenv("NETBIRD_SANDBOX_SETUP_KEY", CONTROL_TOKEN)
         assert client.post("/jobs", json={"type": "connectivity"}).status_code == 503
         monkeypatch.delenv("NETBIRD_SANDBOX_SETUP_KEY")
+        monkeypatch.setenv("NETBIRD_CONTROL_SETUP_KEY", CONTROL_TOKEN)
+        assert client.post("/jobs", json={"type": "connectivity"}).status_code == 503
+        monkeypatch.delenv("NETBIRD_CONTROL_SETUP_KEY")
         assert client.post("/jobs", json={"type": "connectivity"}).status_code == 401
         assert client.get("/jobs/nonexistent").status_code == 401
 

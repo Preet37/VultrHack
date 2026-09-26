@@ -81,9 +81,10 @@ async def check_private_endpoint(client, netbird_ip):
         raise RuntimeError("OpenSandbox allowed unauthenticated sandbox listing")
 
 
-def netbird_enrollment_user_data(setup_key):
+def netbird_enrollment_user_data(setup_key, ssh_sftp=False):
     if not isinstance(setup_key, str) or not re.fullmatch(r"[A-Za-z0-9-]{32,128}", setup_key):
         raise ValueError("A valid one-off NetBird setup key is required")
+    ssh_flags = " --allow-server-ssh --enable-ssh-sftp" if ssh_sftp else ""
     return (
         "curl -fsSL https://pkgs.netbird.io/debian/public.key | gpg --batch --yes --dearmor -o /usr/share/keyrings/netbird-archive-keyring.gpg\n"
         "printf '%s\\n' 'deb [signed-by=/usr/share/keyrings/netbird-archive-keyring.gpg] https://pkgs.netbird.io/debian stable main' > /etc/apt/sources.list.d/netbird.list\n"
@@ -93,7 +94,7 @@ def netbird_enrollment_user_data(setup_key):
         "umask 077\n"
         f"printf '%s' {shlex.quote(setup_key)} > /root/cerberus-netbird-setup.key\n"
         "trap 'rm -f /root/cerberus-netbird-setup.key' EXIT\n"
-        "netbird up --setup-key-file /root/cerberus-netbird-setup.key\n"
+        f"netbird up --setup-key-file /root/cerberus-netbird-setup.key{ssh_flags}\n"
         "rm /root/cerberus-netbird-setup.key\n"
         "netbird status --check ready\n"
     )

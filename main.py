@@ -1,5 +1,6 @@
 import asyncio
 import ipaddress
+import re
 import secrets
 from pathlib import Path
 from typing import Literal
@@ -92,8 +93,34 @@ async def instance_ready(request: Request, authorization: str | None = Header(de
     return Response(status_code=204)
 
 
+@app.post("/internal/control-ready")
+async def control_ready(request: Request, authorization: str | None = Header(default=None)):
+    token = authorization[7:] if authorization and authorization.startswith("Bearer ") else ""
+    if not ready_signals.has(token):
+        raise HTTPException(status_code=404)
+    if len(await request.body()) > 1024:
+        raise HTTPException(status_code=413)
+    try:
+        proof = await request.json()
+        address = ipaddress.ip_address(proof["netbird_ip"])
+    except (ValueError, TypeError, KeyError):
+        raise HTTPException(status_code=400)
+    if (
+        not isinstance(proof, dict)
+        or address not in ipaddress.ip_network("100.64.0.0/10")
+        or not isinstance(proof.get("repo_commit"), str)
+        or not re.fullmatch(r"[0-9a-f]{40}", proof["repo_commit"])
+        or proof.get("bootstrapped") is not True
+    ):
+        raise HTTPException(status_code=400)
+    if not ready_signals.signal(token, proof):
+        raise HTTPException(status_code=404)
+    return Response(status_code=204)
+
+
 callback_app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 callback_app.add_api_route("/internal/ready", instance_ready, methods=["POST"])
+callback_app.add_api_route("/internal/control-ready", control_ready, methods=["POST"])
 
 
 @app.post("/jobs", status_code=202)

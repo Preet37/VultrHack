@@ -96,22 +96,27 @@ class VultrInstances:
         self.headers = {"Authorization": f"Bearer {api_key}"}
 
     async def create(self, region, plan, os_id, callback_url, ready_token, opensandbox_spike=False, netbird_setup_key=None):
+        script = docker_user_data(callback_url, ready_token, opensandbox_spike, netbird_setup_key)
+        return await self.create_with_user_data(
+            region, plan, os_id, f"cerberus-{uuid4().hex[:12]}", ["cerberus"], script, (ready_token, netbird_setup_key)
+        )
+
+    async def create_with_user_data(self, region, plan, os_id, label, tags, script, secrets_to_redact=()):
         if not plan.startswith("vx1-") or not re.search(r"-\d+s$", plan):
             raise ValueError("A VX1 plan with local NVMe storage is required")
-        script = docker_user_data(callback_url, ready_token, opensandbox_spike, netbird_setup_key)
         payload = {
             "region": region,
             "plan": plan,
             "os_id": os_id,
             "block_devices": [{"block_id": "local", "bootable": True}],
-            "label": f"cerberus-{uuid4().hex[:12]}",
-            "tags": ["cerberus"],
+            "label": label,
+            "tags": tags,
             "user_data": base64.b64encode(script.encode()).decode(),
         }
         response = await self.client.post(API_URL, headers=self.headers, json=payload)
         if response.status_code == 400:
             detail = str(response.json().get("error", "Invalid instance parameters"))
-            for secret in (self.headers["Authorization"][7:], ready_token, payload["user_data"], netbird_setup_key):
+            for secret in (self.headers["Authorization"][7:], payload["user_data"], *secrets_to_redact):
                 if secret:
                     detail = detail.replace(secret, "[redacted]")
             detail = detail.replace("\n", " ").replace("\r", " ")[:200]
