@@ -364,15 +364,13 @@ def docker_user_data(callback_url, ready_token, opensandbox_spike=False, netbird
         "apt-get update\n"
         "apt-get install -y runsc\n"
         "runsc install\n"
-        "python3 -c 'import json; from pathlib import Path; p=Path(\"/etc/docker/daemon.json\"); config=json.loads(p.read_text()); config[\"default-runtime\"]=\"runsc\"; p.write_text(json.dumps(config))'\n"
-        "systemctl restart docker\n"
     )
     if private_callback or vpc_callback:
         script += "cerberus_report_stage runtime_smoke\n"
     script += (
         "sandbox_output=$(docker run --rm --runtime=runsc --network=none --read-only --cap-drop=ALL --pids-limit=32 busybox:1.37.0 sh -c 'hostname; uname -a')\n"
         "export SANDBOX_OUTPUT=\"$sandbox_output\"\n"
-        "test \"$(docker info --format '{{.DefaultRuntime}}')\" = runsc\n"
+        "docker info --format '{{json .Runtimes}}' | grep -q '\"runsc\"'\n"
         "proof=$(python3 -c 'import json,os,platform,re; flags=open(\"/proc/cpuinfo\").read(); cpu=re.search(r\"\\b(vmx|svm)\\b\",flags).group(1); sandbox=os.environ[\"SANDBOX_OUTPUT\"].splitlines(); print(json.dumps({\"hostname\":platform.node(),\"uname\":\" \".join(os.uname()),\"cpu_virt\":cpu,\"kvm_device\":os.path.exists(\"/dev/kvm\"),\"kvm_access\":os.access(\"/dev/kvm\",os.R_OK|os.W_OK),\"runtime\":\"runsc\",\"sandbox_hostname\":sandbox[0],\"sandbox_uname\":sandbox[1],\"exit_code\":0}))')\n"
     )
     if netbird_setup_key is not None and not private_callback:

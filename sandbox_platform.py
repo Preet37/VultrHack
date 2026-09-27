@@ -315,6 +315,8 @@ def opensandbox_spike_user_data(netbird=False, report_stages=False, vpc_subnet=N
     script = (
         f"printf '%s' {shlex.quote(source)} | base64 -d | python3 -c 'import sys,zlib; sys.stdout.buffer.write(zlib.decompress(sys.stdin.buffer.read()))' > /root/sandbox_platform.py\n"
         f"{stage_line('opensandbox_dependencies')}"
+        "python3 -c 'import json; from pathlib import Path; p=Path(\"/etc/docker/daemon.json\"); config=json.loads(p.read_text()); config[\"default-runtime\"]=\"runsc\"; p.write_text(json.dumps(config))'\n"
+        "systemctl restart docker\n"
         "apt-get install -y python3-venv iptables iproute2\n"
         "python3 -m venv /root/opensandbox-venv\n"
         "/root/opensandbox-venv/bin/pip install --disable-pip-version-check --no-input opensandbox-server==0.2.3 opensandbox==0.1.16\n"
