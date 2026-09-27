@@ -18,7 +18,7 @@ from main import BOOTSTRAP_STAGES
 from sandbox_platform import (
     assert_closed_probe_port, build_opensandbox_config, check_private_endpoint, host_drop_packets,
     install_forward_drop_probe, install_host_drop_probe, install_ipv6_drop_probe, netbird_enrollment_user_data, opensandbox_spike_user_data,
-    recent_host_drop_log, verified_probe_bridge,
+    recent_host_drop_log, verified_probe_bridge, verified_vpc_address,
 )
 
 
@@ -48,6 +48,27 @@ def test_docker_without_internal_dns_forwarding_fix_is_rejected():
     docker_info, network = host_state()
     with pytest.raises(ValueError, match="Docker 26"):
         build_opensandbox_config({**docker_info, "ServerVersion": "25.0.5"}, network)
+
+
+def test_vpc_server_binds_only_to_verified_private_interface_and_subnet():
+    network, _, _ = probe_state()
+    network["IPAM"]["Config"][0].update({"Subnet": "172.29.240.0/24", "Gateway": "172.29.240.1"})
+    interfaces = [
+        {"ifname": "ens3", "addr_info": [{"family": "inet", "local": "64.177.8.46"}]},
+        {"ifname": "ens7", "addr_info": [{"family": "inet", "local": "10.52.0.3"}]},
+    ]
+    address = verified_vpc_address("10.52.0.0/24", interfaces)
+    config, _ = build_opensandbox_config(host_state()[0], network, vpc_address=address, vpc_subnet="10.52.0.0/24")
+    assert tomllib.loads(config)["server"]["host"] == "10.52.0.3"
+    with pytest.raises(ValueError, match="VPC"):
+        verified_vpc_address("10.52.0.0/24", interfaces + [{"ifname": "ens8", "addr_info": [{"family": "inet", "local": "10.52.0.4"}]}])
+    with pytest.raises(ValueError, match="VPC"):
+        build_opensandbox_config(host_state()[0], network, vpc_address="192.0.2.1", vpc_subnet="10.52.0.0/24")
+    with pytest.raises(ValueError, match="VPC"):
+        build_opensandbox_config(host_state()[0], network, vpc_address="172.29.240.3", vpc_subnet="172.29.240.0/24")
+    network["IPAM"]["Config"][0].update({"Subnet": "172.23.0.0/16", "Gateway": "172.23.0.1"})
+    with pytest.raises(ValueError, match="VPC"):
+        build_opensandbox_config(host_state()[0], network, vpc_address="10.52.0.3", vpc_subnet="10.52.0.0/24")
 
 
 def test_config_is_authenticated_and_confined_to_gvisor_internal_network():
@@ -388,7 +409,21 @@ def test_generated_smoke_proof_requires_denials_and_host_counter(test_net_exit, 
 
 def test_private_sandbox_bootstrap_stays_within_conservative_user_data_budget():
     script = docker_user_data("http://100.124.55.15:8000/internal/ready", "R" * 36, True, "A" * 36, True)
+    vpc_script = docker_user_data("http://10.52.0.2:8001/internal/ready", "R" * 36, True, vpc_callback=True, vpc_subnet="10.52.0.0/24")
     assert len(base64.b64encode(script.encode())) < 16 * 1024
+    assert len(base64.b64encode(vpc_script.encode())) < 16 * 1024
+
+
+def test_vpc_bootstrap_embedded_python_is_valid_and_excludes_netbird_enrolment():
+    script = docker_user_data("http://10.52.0.2:8001/internal/ready", "R" * 36, True, vpc_callback=True, vpc_subnet="10.52.0.0/24")
+    encoded = script.split("printf '%s' ", 1)[1].split(" | base64 -d |", 1)[0]
+    module = zlib.decompress(base64.b64decode(encoded)).decode()
+    config = script.split("PYTHONPATH=/root python3 - <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    assert "verified_vpc_address" in module and "verified_vpc_address" in config
+    assert 'data["vpc_ip"]' in script and "netbird up" not in script
+    ast.parse(module)
+    ast.parse(config)
+    ast.parse(embedded_smoke_source(script))
 
 
 def test_private_server_binds_only_to_connected_netbird_address():
@@ -446,6 +481,31 @@ def test_private_endpoint_rejects_unauthenticated_access():
             await check_private_endpoint(client, "100.124.192.2")
 
     with pytest.raises(RuntimeError, match="unauthenticated"):
+        asyncio.run(request())
+
+
+def test_vpc_endpoint_is_checked_over_private_subnet_with_api_authentication():
+    paths = []
+
+    def respond(request):
+        paths.append(str(request.url))
+        return httpx.Response(200, json={"status": "healthy"}) if request.url.path == "/health" else httpx.Response(401)
+
+    async def request():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            await check_private_endpoint(client, "10.52.0.3", vpc_subnet="10.52.0.0/24")
+
+    asyncio.run(request())
+    assert paths == ["http://10.52.0.3:8080/health", "http://10.52.0.3:8080/v1/sandboxes"]
+
+
+@pytest.mark.parametrize("address,subnet", [("192.0.2.1", "192.0.2.0/24"), ("10.53.0.3", "10.52.0.0/24"), ("10.52.0.3", "")])
+def test_vpc_endpoint_rejects_unverified_destination_before_network(address, subnet):
+    async def request():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: pytest.fail("Network call"))) as client:
+            await check_private_endpoint(client, address, vpc_subnet=subnet)
+
+    with pytest.raises(ValueError, match="VPC"):
         asyncio.run(request())
 
 

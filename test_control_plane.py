@@ -3,13 +3,14 @@ import asyncio
 import base64
 import json
 import subprocess
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
 from control_plane import (
-    ControlPlaneInstances, bootstrap_control_plane, control_plane_user_data,
-    install_control_credentials, render_control_env,
+    ControlPlaneInstances, bootstrap_control_plane, control_listener_addresses,
+    control_plane_user_data, install_control_credentials, render_control_env, serve_control_plane,
 )
 from main import callback_app, ready_signals
 
@@ -36,10 +37,75 @@ def test_bootstrap_contains_one_off_netbird_key_but_no_vultr_credentials():
     assert REPO_SHA in script
     assert "ConditionPathExists=/home/cerberus/.config/cerberus/control.env" in script
     assert "PathExists=/home/cerberus/.config/cerberus/control.env" in script
-    assert "--host" in script and "netbirdIp" in script
+    assert "serve_control_plane()" in script and "netbirdIp" in script
     assert subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True).returncode == 0
     ast.parse(script.split("cat > /usr/local/bin/cerberus-control-start <<'PY'\n", 1)[1].split("\nPY\n", 1)[0])
     ast.parse(script.split("proof=$(python3 -c '", 1)[1].split("')\n", 1)[0])
+
+
+def test_control_server_uses_separate_private_sockets_in_one_process(monkeypatch):
+    import control_plane
+    import socket
+    import uvicorn
+
+    bound = []
+    served = []
+
+    class FakeSocket:
+        def setsockopt(self, *args):
+            pass
+
+        def bind(self, address):
+            bound.append(address)
+
+        def listen(self, backlog):
+            pass
+
+        def setblocking(self, value):
+            pass
+
+        def close(self):
+            pass
+
+    async def serve(sockets):
+        served.extend(sockets)
+
+    monkeypatch.setenv("CERBERUS_CONTROL_VPC_IP", "10.52.0.2")
+    monkeypatch.setenv("CERBERUS_VPC_SUBNET", "10.52.0.0/24")
+    monkeypatch.setattr(control_plane.subprocess, "check_output", lambda *args, **kwargs: json.dumps({
+        "netbirdIp": "100.124.55.15/16", "management": {"connected": True}, "signal": {"connected": True},
+    }))
+    monkeypatch.setattr(control_plane, "socket", SimpleNamespace(
+        AF_INET=socket.AF_INET, SOCK_STREAM=socket.SOCK_STREAM,
+        SOL_SOCKET=socket.SOL_SOCKET, SO_REUSEADDR=socket.SO_REUSEADDR,
+        socket=lambda *args: FakeSocket(),
+    ))
+    monkeypatch.setattr(uvicorn, "Config", lambda app, **kwargs: SimpleNamespace(app=app, **kwargs))
+    monkeypatch.setattr(uvicorn, "Server", lambda config: SimpleNamespace(serve=serve))
+    serve_control_plane()
+    assert bound == [("100.124.55.15", 8000), ("10.52.0.2", 8001)]
+    assert len(served) == 2
+    bound.clear()
+    monkeypatch.delenv("CERBERUS_VPC_SUBNET")
+    serve_control_plane()
+    assert bound == [("100.124.55.15", 8000)]
+
+
+def test_control_listeners_keep_operator_api_on_netbird_and_vpc_callbacks_separate():
+    status = {"netbirdIp": "100.124.55.15/16", "management": {"connected": True}, "signal": {"connected": True}}
+    assert control_listener_addresses(status) == [("100.124.55.15", 8000)]
+    assert control_listener_addresses(status, "10.52.0.2", "10.52.0.0/24") == [("100.124.55.15", 8000), ("10.52.0.2", 8001)]
+
+
+@pytest.mark.parametrize("vpc_ip,vpc_subnet", [
+    ("0.0.0.0", "10.52.0.0/24"), ("127.0.0.1", "10.52.0.0/24"),
+    ("100.124.55.15", "100.124.0.0/16"), ("192.0.2.1", "192.0.2.0/24"),
+    ("10.53.0.2", "10.52.0.0/24"), ("10.52.0.2", None),
+])
+def test_control_listener_refuses_public_or_unverified_vpc_address(vpc_ip, vpc_subnet):
+    status = {"netbirdIp": "100.124.55.15/16", "management": {"connected": True}, "signal": {"connected": True}}
+    with pytest.raises(ValueError, match="VPC"):
+        control_listener_addresses(status, vpc_ip, vpc_subnet)
 
 
 @pytest.mark.parametrize("callback,repo_sha", [

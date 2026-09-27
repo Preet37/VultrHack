@@ -2,9 +2,11 @@ import argparse
 import asyncio
 import base64
 import ipaddress
+import json
 import os
 import re
 import shlex
+import socket
 import subprocess
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -14,6 +16,50 @@ from instance_lifecycle import API_URL, DEFAULT_VX1_PLAN, VultrInstances, block_
 from sandbox_platform import netbird_enrollment_user_data
 
 REPO_URL = "https://github.com/Preet37/VultrHack.git"
+
+
+def control_listener_addresses(netbird_status, vpc_ip=None, vpc_subnet=None):
+    try:
+        netbird_ip = ipaddress.ip_interface(netbird_status["netbirdIp"]).ip
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("Connected NetBird control peer required") from None
+    if netbird_status["management"]["connected"] is not True or netbird_status["signal"]["connected"] is not True or netbird_ip not in ipaddress.ip_network("100.64.0.0/10"):
+        raise ValueError("Connected NetBird control peer required")
+    listeners = [(str(netbird_ip), 8000)]
+    if vpc_ip is None and vpc_subnet is None:
+        return listeners
+    try:
+        address = ipaddress.ip_address(vpc_ip)
+        subnet = ipaddress.ip_network(vpc_subnet)
+    except (TypeError, ValueError):
+        raise ValueError("VPC listener needs a validated private IPv4 address and subnet") from None
+    private_ranges = (ipaddress.ip_network(value) for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+    if not isinstance(address, ipaddress.IPv4Address) or not isinstance(subnet, ipaddress.IPv4Network) or not any(subnet.subnet_of(block) for block in private_ranges) or address not in subnet or address in (subnet.network_address, subnet.broadcast_address):
+        raise ValueError("VPC listener needs a validated private IPv4 address and subnet")
+    listeners.append((str(address), 8001))
+    return listeners
+
+
+def serve_control_plane():
+    import uvicorn
+
+    status = json.loads(subprocess.check_output(["netbird", "status", "--json"], text=True))
+    vpc_ip, vpc_subnet = os.getenv("CERBERUS_CONTROL_VPC_IP"), os.getenv("CERBERUS_VPC_SUBNET")
+    listeners = control_listener_addresses(status, vpc_ip if vpc_subnet else None, vpc_subnet if vpc_ip else None)
+    sockets = []
+    try:
+        for address, port in listeners:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sockets.append(sock)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((address, port))
+            sock.listen(2048)
+            sock.setblocking(False)
+        config = uvicorn.Config("main:control_server_app", host=listeners[0][0], port=8000, workers=1, log_level="warning", access_log=False)
+        asyncio.run(uvicorn.Server(config).serve(sockets=sockets))
+    finally:
+        for sock in sockets:
+            sock.close()
 
 
 def control_plane_user_data(callback_url, ready_token, setup_key, repo_sha):
@@ -40,16 +86,9 @@ def control_plane_user_data(callback_url, ready_token, setup_key, repo_sha):
         "/opt/cerberus-venv/bin/pip install --disable-pip-version-check --no-input -r /opt/cerberus/requirements.txt\n"
         "install -d -m 700 -o cerberus -g cerberus /home/cerberus/.config/cerberus\n"
         "cat > /usr/local/bin/cerberus-control-start <<'PY'\n"
-        "#!/usr/bin/python3\n"
-        "import ipaddress\n"
-        "import json\n"
-        "import os\n"
-        "import subprocess\n"
-        "status = json.loads(subprocess.check_output(['netbird', 'status', '--json']))\n"
-        "address = ipaddress.ip_interface(status['netbirdIp']).ip\n"
-        "if status['management']['connected'] is not True or status['signal']['connected'] is not True or address not in ipaddress.ip_network('100.64.0.0/10'):\n"
-        "    raise SystemExit('NetBird control peer is not ready')\n"
-        "os.execv('/opt/cerberus-venv/bin/uvicorn', ['uvicorn', 'main:app', '--host', str(address), '--port', '8000', '--workers', '1'])\n"
+        "#!/opt/cerberus-venv/bin/python3\n"
+        "from control_plane import serve_control_plane\n"
+        "serve_control_plane()\n"
         "PY\n"
         "chmod 755 /usr/local/bin/cerberus-control-start\n"
         "cat > /etc/systemd/system/cerberus.service <<'UNIT'\n"

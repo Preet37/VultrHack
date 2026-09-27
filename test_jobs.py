@@ -142,6 +142,28 @@ def test_sandbox_job_requires_feature_gate_explicit_approval_and_one_off_key(aut
         assert client.post("/jobs", headers=auth, json={"type": "connectivity", "netbird_setup_key": "A" * 36}).status_code == 400
 
 
+def test_vpc_sandbox_job_needs_no_setup_key_but_still_requires_explicit_approval(auth, monkeypatch):
+    seen = []
+
+    async def fake_vpc_smoke(job, key, signals, vpc_mode=False):
+        seen.append((key, vpc_mode))
+        job.result = {"destroyed": True}
+        await job.publish("completed")
+
+    monkeypatch.setenv("CERBERUS_ENABLE_SANDBOX_JOBS", "true")
+    monkeypatch.setenv("CERBERUS_VPC_ID", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    monkeypatch.setenv("CERBERUS_CONTROL_INSTANCE_ID", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+    monkeypatch.setenv("CERBERUS_CONTROL_VPC_IP", "10.52.0.2")
+    monkeypatch.setenv("CERBERUS_VPC_SUBNET", "10.52.0.0/24")
+    monkeypatch.setattr(jobs, "run_sandbox_smoke_job", fake_vpc_smoke)
+    with TestClient(app) as client:
+        assert client.post("/jobs", headers=auth, json={"type": "sandbox_smoke"}).status_code == 400
+        r = client.post("/jobs", headers=auth, json={"type": "sandbox_smoke", "approve_vm": True})
+        assert r.status_code == 202
+        assert wait_for_terminal(client, r.json()["id"], auth)["status"] == "completed"
+    assert seen == [(None, True)]
+
+
 def test_sandbox_job_events_and_result_never_include_setup_key(auth, monkeypatch):
     seen = []
 
@@ -274,6 +296,124 @@ def test_sandbox_worker_proves_private_path_and_cleans_up(monkeypatch, readiness
         assert "A" * 36 not in str(job.result) + str(job.events)
         assert "scoped-secret-should-stay-private" not in str(job.result) + str(job.events)
         assert "secret-in-proof" not in str(job.result) + str(job.events)
+
+
+@pytest.mark.parametrize("reported_ip", ["10.52.0.3", "10.52.0.4"])
+def test_vpc_worker_proves_private_connection_without_a_netbird_setup_key(monkeypatch, reported_ip):
+    vpc_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    control_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    destroyed = False
+    calls = []
+    proof = {
+        "hostname": "vx1", "uname": "Linux vx1", "cpu_virt": "svm", "kvm_device": True, "kvm_access": True,
+        "sandbox_hostname": "smoke", "sandbox_uname": "Linux gvisor", "exit_code": 0, "vpc_ip": reported_ip,
+        "opensandbox": {"hostname": "sandbox", "uname": "Linux 4.19.0-gvisor", "exit_code": 0, "isolation": {
+            "network_id": "a" * 64, "bridge": "br-aaaaaaaaaaaa", "gateway": "172.23.0.1",
+            "test_net_1": {"destination": "192.0.2.1:65000", "exit_code": 1},
+            "dns_external": {"destination": "example.com", "exit_code": 1},
+            "host_gateway": {"destination": "172.23.0.1:65000", "exit_code": 1},
+            "host_drop_packets_before": 0, "host_drop_packets_after": 1, "host_drop_packets_delta": 1,
+            "kernel_drop_log": "cerberus-os-drop IN=br-aaaaaaaaaaaa OUT= DST=172.23.0.1 DPT=65000",
+        }},
+    }
+
+    class Signals:
+        def register(self):
+            return "R" * 36
+
+        async def wait(self, token, timeout):
+            return proof
+
+        def stage(self, token):
+            return None
+
+        def unregister(self, token):
+            pass
+
+    def respond(request):
+        nonlocal destroyed
+        calls.append((request.method, request.url.path))
+        path = request.url.path
+        if path == f"/v2/vpcs/{vpc_id}":
+            return httpx.Response(200, json={"vpc": {"id": vpc_id, "region": "ord", "v4_subnet": "10.52.0.0", "v4_subnet_mask": 24}})
+        if path == f"/v2/instances/{control_id}/vpcs":
+            return httpx.Response(200, json={"vpcs": [{"id": vpc_id, "ip_address": "10.52.0.2"}]})
+        if request.method == "HEAD" and request.url.host == "10.52.0.2":
+            return httpx.Response(405)
+        if request.method == "POST":
+            payload = json.loads(request.content)
+            script = base64.b64decode(payload["user_data"]).decode()
+            assert payload["attach_vpc"] == [vpc_id]
+            assert "netbird up" not in script and "account-key" not in script
+            return httpx.Response(202, json={"instance": {"id": "instance-123"}})
+        if path == "/v2/instances/instance-123/vpcs":
+            return httpx.Response(200, json={"vpcs": [{"id": vpc_id, "ip_address": "10.52.0.3"}]})
+        if request.method == "DELETE":
+            destroyed = True
+            return httpx.Response(204)
+        if path == "/v2/instances/instance-123":
+            return httpx.Response(404 if destroyed else 200, json={"instance": {"status": "active", "power_status": "running"}})
+        if path == "/health":
+            return httpx.Response(200, json={"status": "healthy"})
+        return httpx.Response(401)
+
+    for name, value in (("CERBERUS_VPC_ID", vpc_id), ("CERBERUS_CONTROL_INSTANCE_ID", control_id),
+                        ("CERBERUS_CONTROL_VPC_IP", "10.52.0.2"), ("CERBERUS_VPC_SUBNET", "10.52.0.0/24"),
+                        ("VULTR_REGION", "ord")):
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(jobs, "load_keys", lambda: ("account-key", "inference-key"))
+    client_type = httpx.AsyncClient
+    monkeypatch.setattr(jobs.httpx, "AsyncClient", lambda **kwargs: client_type(transport=httpx.MockTransport(respond), **kwargs))
+    job = jobs.Job(kind="sandbox_smoke")
+    asyncio.run(jobs.run_sandbox_smoke_job(job, None, Signals(), vpc_mode=True))
+    assert job.status == ("completed" if reported_ip == "10.52.0.3" else "failed") and destroyed
+    if reported_ip == "10.52.0.3":
+        assert job.result["destroyed"] and job.result["opensandbox"]["isolation"]["dns_external"]["exit_code"] == 1
+        assert job.result["vpc_ip"] == "10.52.0.3"
+        assert "account-key" not in str(job.result) + str(job.events)
+    else:
+        assert job.result is None and ("GET", "/health") not in calls
+    assert calls.index(("GET", f"/v2/instances/{control_id}/vpcs")) < calls.index(("POST", "/v2/instances"))
+    assert ("GET", "/v2/instances/instance-123") == calls[-1]
+
+
+@pytest.mark.parametrize("bad_attachment", [True, False])
+def test_vpc_job_refuses_unverified_control_network_before_provision(monkeypatch, bad_attachment):
+    vpc_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    control_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    seen = []
+
+    class Signals:
+        def register(self):
+            return "R" * 36
+
+        def stage(self, token):
+            return None
+
+        def unregister(self, token):
+            pass
+
+    def respond(request):
+        seen.append((request.method, request.url.path))
+        if request.method == "POST":
+            pytest.fail("VPC preflight must reject this without creating a VM")
+        if request.url.path == f"/v2/vpcs/{vpc_id}":
+            return httpx.Response(200, json={"vpc": {"id": vpc_id, "region": "ord", "v4_subnet": "10.52.0.0", "v4_subnet_mask": 24}})
+        if request.url.path == f"/v2/instances/{control_id}/vpcs":
+            return httpx.Response(200, json={"vpcs": [{"id": vpc_id, "ip_address": "10.52.0.4" if bad_attachment else "10.52.0.2"}]})
+        return httpx.Response(404 if not bad_attachment else 200)
+
+    for name, value in (("CERBERUS_VPC_ID", vpc_id), ("CERBERUS_CONTROL_INSTANCE_ID", control_id),
+                        ("CERBERUS_CONTROL_VPC_IP", "10.52.0.2"), ("CERBERUS_VPC_SUBNET", "10.52.0.0/24"),
+                        ("VULTR_REGION", "ord")):
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(jobs, "load_keys", lambda: ("account-key", "inference-key"))
+    client_type = httpx.AsyncClient
+    monkeypatch.setattr(jobs.httpx, "AsyncClient", lambda **kwargs: client_type(transport=httpx.MockTransport(respond), **kwargs))
+    job = jobs.Job(kind="sandbox_smoke")
+    asyncio.run(jobs.run_sandbox_smoke_job(job, None, Signals(), vpc_mode=True))
+    assert job.status == "failed" and job.result is None
+    assert all(method != "POST" for method, _ in seen)
 
 
 def test_registry_allows_only_one_active_sandbox_vm():

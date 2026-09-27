@@ -74,12 +74,12 @@ class JobRegistry:
         self.jobs = {}
         self.tasks = set()
 
-    def create(self, kind="connectivity", setup_key=None, signals=None, target=None):
+    def create(self, kind="connectivity", setup_key=None, signals=None, vpc_mode=False, target=None):
         if kind not in ("connectivity", "sandbox_smoke", "scan"):
             raise ValueError("Unsupported job type")
         if kind == "sandbox_smoke":
-            if not setup_key or signals is None:
-                raise ValueError("Sandbox job requires a one-off key and readiness signals")
+            if signals is None or (not setup_key and not vpc_mode) or (setup_key and vpc_mode):
+                raise ValueError("Sandbox job requires one private network mode and readiness signals")
             if any(job.kind == kind and job.status not in TERMINAL for job in self.jobs.values()):
                 return None
         if kind == "scan":
@@ -99,6 +99,8 @@ class JobRegistry:
             worker = run_connectivity_job(job)
         elif kind == "scan":
             worker = run_scan_job(job, target)
+        elif vpc_mode:
+            worker = run_sandbox_smoke_job(job, setup_key, signals, vpc_mode=True)
         else:
             worker = run_sandbox_smoke_job(job, setup_key, signals)
         task = asyncio.create_task(worker)
@@ -229,9 +231,9 @@ async def run_scan_job(job, target_name):
             await asyncio.to_thread(_stop, proc)
 
 
-async def run_sandbox_smoke_job(job, setup_key, signals):
-    from instance_lifecycle import DEFAULT_VX1_PLAN, VultrInstances, temporary_instance
-    from sandbox_platform import HOST_PROBE_LOG_PREFIX, PROBE_PORT, check_private_endpoint
+async def run_sandbox_smoke_job(job, setup_key, signals, vpc_mode=False):
+    from instance_lifecycle import DEFAULT_VX1_PLAN, VultrInstances, temporary_instance, validated_vpc_id, validated_vpc_subnet
+    from sandbox_platform import HOST_PROBE_LOG_PREFIX, PROBE_PORT, VPC_INTERNAL_SUBNET, check_private_endpoint
 
     instance_id = None
     token = None
@@ -239,10 +241,18 @@ async def run_sandbox_smoke_job(job, setup_key, signals):
     readiness_timed_out = False
     await job.publish("running", "preflight")
     try:
-        status = json.loads(subprocess.check_output(["netbird", "status", "--json"], text=True))
-        address = ipaddress.ip_interface(status["netbirdIp"]).ip
-        if status["management"]["connected"] is not True or status["signal"]["connected"] is not True or address not in ipaddress.ip_network("100.64.0.0/10"):
-            raise ValueError("Connected NetBird control peer required")
+        if vpc_mode:
+            vpc_id = validated_vpc_id(os.getenv("CERBERUS_VPC_ID"))
+            control_id = validated_vpc_id(os.getenv("CERBERUS_CONTROL_INSTANCE_ID"))
+            subnet = validated_vpc_subnet(os.getenv("CERBERUS_VPC_SUBNET"))
+            control_ip = ipaddress.ip_address(os.getenv("CERBERUS_CONTROL_VPC_IP"))
+            if not isinstance(control_ip, ipaddress.IPv4Address) or control_ip not in subnet or control_ip in (subnet.network_address, subnet.broadcast_address) or subnet.overlaps(ipaddress.ip_network(VPC_INTERNAL_SUBNET)):
+                raise ValueError("Control VPC address or subnet is invalid")
+        else:
+            status = json.loads(subprocess.check_output(["netbird", "status", "--json"], text=True))
+            address = ipaddress.ip_interface(status["netbirdIp"]).ip
+            if status["management"]["connected"] is not True or status["signal"]["connected"] is not True or address not in ipaddress.ip_network("100.64.0.0/10"):
+                raise ValueError("Connected NetBird control peer required")
         raw_hold = os.getenv("CERBERUS_DIAGNOSTIC_HOLD_SECONDS", "0")
         if not re.fullmatch(r"[0-9]{1,3}", raw_hold) or int(raw_hold) > 300:
             raise ValueError("Diagnostic hold must be between 0 and 300 seconds")
@@ -258,9 +268,28 @@ async def run_sandbox_smoke_job(job, setup_key, signals):
         await job.publish("running", "provisioning")
         async with httpx.AsyncClient(timeout=60, trust_env=False) as client:
             api = VultrInstances(client, api_key)
-            callback = f"http://{address}:8000/internal/ready"
-            async with temporary_instance(api, os.getenv("VULTR_REGION", "ord"), os.getenv("VULTR_PLAN", DEFAULT_VX1_PLAN), 2284, callback, token, True, setup_key, True) as instance_id:
+            region = os.getenv("VULTR_REGION", "ord")
+            if vpc_mode:
+                vpc = await api.get_vpc(vpc_id)
+                if vpc.get("region") != region or validated_vpc_subnet(f"{vpc['v4_subnet']}/{vpc['v4_subnet_mask']}") != subnet:
+                    raise ValueError("Configured VPC does not match the approved region and subnet")
+                attached = await api.list_instance_vpcs(control_id)
+                if len(attached) != 1 or attached[0].get("id") != vpc_id or attached[0].get("ip_address") != str(control_ip):
+                    raise ValueError("Control VX1 is not attached to the approved VPC address")
+                route = await client.head(f"http://{control_ip}:8001/internal/stage", timeout=5)
+                if route.status_code != 405:
+                    raise ValueError("Private VPC callback listener is unavailable")
+                callback = f"http://{control_ip}:8001/internal/ready"
+                vpc_options = {"vpc_callback": True, "vpc_subnet": str(subnet), "vpc_id": vpc_id}
+            else:
+                callback = f"http://{address}:8000/internal/ready"
+                vpc_options = {}
+            async with temporary_instance(api, region, os.getenv("VULTR_PLAN", DEFAULT_VX1_PLAN), 2284, callback, token, True, setup_key, not vpc_mode, **vpc_options) as instance_id:
                 await api.wait_active(instance_id)
+                if vpc_mode:
+                    sandbox_ip = await api.wait_vpc_attachment(instance_id, vpc_id, str(subnet))
+                    if sandbox_ip == str(control_ip):
+                        raise ValueError("Disposable and control VX1 cannot share a VPC address")
                 await job.publish("running", "bootstrap")
                 try:
                     proof = await signals.wait(token, timeout=600)
@@ -274,7 +303,7 @@ async def run_sandbox_smoke_job(job, setup_key, signals):
                     raise RuntimeError("Sandbox bootstrap reported a bounded failure stage")
                 sandbox = proof.get("opensandbox")
                 isolation = sandbox.get("isolation") if isinstance(sandbox, dict) else None
-                if "netbird_ip" not in proof or not isinstance(isolation, dict) or "gvisor" not in sandbox.get("uname", "").lower():
+                if (vpc_mode and proof.get("vpc_ip") != sandbox_ip) or (not vpc_mode and "netbird_ip" not in proof) or not isinstance(isolation, dict) or "gvisor" not in sandbox.get("uname", "").lower():
                     raise ValueError("OpenSandbox gVisor isolation proof missing")
                 network_id, bridge, gateway = (isolation.get(name) for name in ("network_id", "bridge", "gateway"))
                 before, after, delta = (isolation.get(name) for name in ("host_drop_packets_before", "host_drop_packets_after", "host_drop_packets_delta"))
@@ -296,7 +325,10 @@ async def run_sandbox_smoke_job(job, setup_key, signals):
                 ):
                     raise ValueError("Host isolation enforcement evidence missing")
                 await job.publish("running", "private_check")
-                await check_private_endpoint(client, proof["netbird_ip"])
+                if vpc_mode:
+                    await check_private_endpoint(client, sandbox_ip, vpc_subnet=str(subnet))
+                else:
+                    await check_private_endpoint(client, proof["netbird_ip"])
                 await job.publish("running", "teardown")
         job.result = {
             "instance_id": instance_id,
@@ -315,6 +347,8 @@ async def run_sandbox_smoke_job(job, setup_key, signals):
             },
             "destroyed": True,
         }
+        if vpc_mode:
+            job.result["vpc_ip"] = sandbox_ip
     except Exception:
         last_stage = signals.stage(token) if token is not None else None
         if failure_stage:
