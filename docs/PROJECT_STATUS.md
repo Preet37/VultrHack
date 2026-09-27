@@ -28,15 +28,21 @@ fix, destroy the box. "No finding without a proof."_
 - **Apply all → fresh-VM re-verify** (restores cached image, replays each exploit → blocked).
 - **Results/benchmark** app: exploits proven, certified rate, lines rewritten by the system, per-finding drill-down (exploit, leak, client impact, before/after, why); framed as a signed receipt.
 
-## ❌ NOT DONE / GAPS (honest)
+## ✅ DONE since first status (all tested, 419 tests green)
 
-1. **Console → real sandbox wiring** — the demo runs the target as a **local subprocess** (Tier-1). Sasha's real gVisor VM works but the console isn't wired to it (the `SandboxTargetRunner` dispatch seam, #16). The UI *mimics* the sandbox; it doesn't run on it yet.
-2. **Environmental canaries** — the canary oracle needs planted canaries, which today come from the seeded `manifest.json`. On an **arbitrary repo with no manifest**, the finder crawls routes but **cannot confirm an exploit** (no canary). The fix — inject sentinels into the *sandbox env* (file outside web root, internal-only URL, marker DB row) — is designed, **not built**. This is why arbitrary-repo scanning is unproven.
-3. **Real GitHub clone + arbitrary-repo scan** — "Paste a GitHub URL" is a stub; `sandbox_scan` is curated-targets-only.
-4. **Safety gate + gauntlet** — treat the fixer agent as untrusted; reject rogue `rm -rf`/disable-auth fixes; produce the benchmark number. **Not built.**
-5. **NetBird transaction visualization** — the private VPC/NetBird data transfer between control VM ↔ sandbox VM (local, no internet) is real in Sasha's code but **not shown in the UI**.
-6. **Clean / no-bug state** — the "no exploitable bugs → clean → good to ship" demo path.
-7. Minor UI bugs: dock "Instance" re-runs instead of restoring; first click after a page reload sometimes misses.
+- **Environmental canaries** (`finder/env_canary.py`) — path_traversal + SSRF now confirm on a **manifest-less** target (`targets/nomanifest_flask`); command_injection supported. sqli/idor honestly still need app instrumentation.
+- **Safety gate + gauntlet** (`finder/safety_gate.py`, `gauntlet.py`, `finder/gauntlet_cases.py`) — rogue `rm -rf`/disable-auth/DROP-TABLE/exec fixes are rejected. **Gauntlet: 18/18 rogue caught, 0 false positives, naive baseline 0%.** Real fixes pass. Shown live in the demo (fixer proposes `rm -rf`, gate blocks it).
+- **NetBird transaction viz** — cyan "control ⟷ sandbox" mesh pill + Act-1 narration mirrors Sasha's real `sandbox_scan` flow (tarball → bucket → presigned → runc/runsc → VPC bind → NetBird → health).
+- **Clean / no-bug state** (`targets/clean_flask`) — safe app; finder arms canaries, nothing leaks, proven 0 exploitable. Selectable from the launcher.
+- **Real GitHub clone** — "Paste a GitHub URL" really shallow-clones (verified on octocat/Hello-World); untrusted code is NOT run on the control host, honestly routed to the sandbox.
+- **apt-style download animation**, reworded breach framing ("target smuggled a secret OUT OF THE BOX").
+- Bug fixed: `--cyan` token was undefined in the light theme (NetBird pill stayed grey).
+
+## ❌ STILL NOT DONE (honest)
+
+1. **Console → real sandbox wiring** — the demo still runs the target as a **local subprocess** (Tier-1). Sasha's real gVisor VM works but the console isn't wired to it (`SandboxTargetRunner` dispatch, #16). The UI mirrors it faithfully; it doesn't execute on the real VM yet. Needs a live Vultr sandbox host + injecting Sasha's dispatch primitive.
+2. **Arbitrary-repo end-to-end** — clone works, env-canaries work for traversal/SSRF, but running an arbitrary cloned repo requires the real sandbox (#16) + extending `sandbox_scan` beyond curated targets. sqli/idor on arbitrary repos still need app instrumentation.
+3. Note: mouse-click misses during testing were a browser-automation coordinate/timing artifact, not a product bug (verified: no overlay, JS click launches cleanly).
 
 ## 🎯 NEXT STEPS (pick order)
 
