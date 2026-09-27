@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Cerberus — live sandbox run</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background:#0b1020; color:#e6e9f2; max-width: 860px; margin: 3rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.2rem; letter-spacing: .06em; }
+    label { display:block; margin:.9rem 0 .25rem; opacity:.8; font-size:.8rem; text-transform:uppercase; letter-spacing:.1em;}
+    input, select { width:100%; padding:.6rem .7rem; background:#131a2e; border:1px solid #2a3550; color:#e6e9f2; border-radius:6px; }
+    input[type=checkbox] { width:auto; }
+    button { margin-top:1rem; padding:.7rem 1.2rem; background:#4f7cff; color:#fff; border:0; border-radius:6px; cursor:pointer; font-weight:600;}
+    button:disabled { opacity:.5; }
+    .status { margin-top:1.5rem; padding:1rem; background:#0e1526; border:1px solid #233052; border-radius:8px; white-space:pre-wrap; font-size:.85rem;}
+    .error { color:#ff7a7a; }
+    .ok { color:#4ade80; }
+  </style>
+</head>
+<body>
+  <h1>CERBERUS · live sandbox run</h1>
+  <div id="login">
+    <label for="pwd">demo password</label>
+    <input id="pwd" type="password" autocomplete="off">
+    <button id="loginBtn">Enter</button>
+  </div>
+  <div id="panel" style="display:none">
+    <label for="repo">repo URL (https) — or seeded target</label>
+    <input id="repo" placeholder="https://github.com/org/repo" value="https://github.com/Preet37/VultrHack">
+    <label for="subpath">subpath (optional)</label>
+    <input id="subpath" placeholder="targets/seeded_flask" value="targets/seeded_flask">
+    <label for="runtime">sandbox runtime</label>
+    <select id="runtime"><option value="gvisor">gVisor (runsc containers)</option><option value="microsandbox">Microsandbox (KVM microVM)</option></select>
+    <label><input id="remediate" type="checkbox"> patch + re-exploit on a second disposable VX1</label>
+    <button id="runBtn">Run</button>
+    <div class="status" id="status">idle</div>
+  </div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    async function post(url, body) {
+      const r = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+      return [r.status, await r.text()];
+    }
+    $("loginBtn").onclick = async () => {
+      const [st, txt] = await post("/api/login", {password: $("pwd").value});
+      if (st !== 204) { $("status")?.textContent || 0; alert(txt); return; }
+      $("login").style.display = "none"; $("panel").style.display = "block";
+    };
+    $("runBtn").onclick = async () => {
+      $("runBtn").disabled = true; $("status").textContent = "starting…";
+      const repo = $("repo").value.trim();
+      const subpath = $("subpath").value.trim();
+      const body = {target_runtime: $("runtime").value, remediate: $("remediate").checked};
+      if (repo) { body.repo = repo; if (subpath) body.subpath = subpath; } else { body.target = "seeded_flask"; }
+      const [st, txt] = await post("/api/runs", body);
+      if (st !== 200) { $("status").textContent = "error: " + txt; $("runBtn").disabled = false; return; }
+      const {job_id} = JSON.parse(txt);
+      $("status").textContent = "job " + job_id + "\n";
+      const poll = setInterval(async () => {
+        const r = await fetch(`/api/runs/${job_id}`);
+        const data = await r.json();
+        if (data.error) { $("status").className="status error"; }
+        $("status").textContent = `status: ${data.status} step: ${data.step}${data.error ? "\n" + data.error : ""}`;
+        if (data.status === "completed" || data.status === "failed") {
+          clearInterval(poll);
+          const rr = await fetch(`/api/runs/${job_id}/result`);
+          const payload = await rr.text();
+          $("status").textContent += "\n\n— result —\n" + payload;
+          $("runBtn").disabled = false;
+        }
+      }, 4000);
+    };
+  </script>
+</body>
+</html>
