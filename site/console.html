@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cerberus console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800;900&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+  :root{
+    --bg:#ebebe7;--panel:#fff;--panel-2:#f4f4f0;--line:#e4e4de;--line-2:#d7d7d0;
+    --ink:#16181c;--ink-2:#5f6572;--ink-3:#9aa0aa;
+    --lime:#c8f23a;--lime-2:#b5e019;--red:#e5484d;--red-bg:#fdecec;--green:#23a15c;--green-bg:#e7f7ee;--amber:#d98e1f;--amber-bg:#fbf1e0;--blue:#3b82f6;--violet:#8b7bff;
+    --scr:#0d1015;--sdim:#6f7a8a;--sink:#c6cedb;
+    --disp:"Archivo","Inter",system-ui,sans-serif;--sans:"Inter",system-ui,sans-serif;--mono:"JetBrains Mono",ui-monospace,Menlo,monospace;
+    --sh:0 1px 2px rgba(22,24,28,.05),0 2px 6px rgba(22,24,28,.04);--sh-lg:0 18px 48px rgba(22,24,28,.12),0 4px 12px rgba(22,24,28,.06);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1200px;margin:0 auto;padding-inline:20px}
+  .mono{font-family:var(--mono)}
+
+  .top{display:flex;align-items:center;gap:12px;padding:14px 0}
+  .brand{display:flex;align-items:center;gap:9px;font-family:var(--disp);font-weight:800;font-size:17px}
+  .brand .mk{width:26px;height:26px;border-radius:8px;background:var(--ink);display:flex;align-items:center;justify-content:center}
+  .repo{display:flex;align-items:center;gap:7px;background:var(--panel);border:1px solid var(--line-2);border-radius:11px;padding:6px 7px 6px 12px;box-shadow:var(--sh)}
+  .repo .g{font-family:var(--mono);font-size:11px;color:var(--ink-3)}
+  .repo select{border:0;outline:0;background:transparent;font-family:var(--mono);font-size:12.5px;color:var(--ink)}
+  .go{background:var(--ink);color:#fff;border:0;border-radius:9px;padding:9px 18px;font-family:var(--disp);font-weight:700;font-size:13.5px;cursor:pointer;display:inline-flex;gap:8px;align-items:center}
+  .go:hover{background:#000}.go[disabled]{opacity:.55;cursor:progress}
+  .go .tri{width:0;height:0;border-left:8px solid var(--lime);border-top:5px solid transparent;border-bottom:5px solid transparent}
+  .status{margin-left:auto;display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:11.5px;color:var(--ink-2)}
+  .badge{display:inline-flex;align-items:center;gap:6px;background:var(--panel);border:1px solid var(--line-2);border-radius:999px;padding:5px 11px}
+  .badge b{color:var(--ink)}.badge i{width:6px;height:6px;border-radius:50%;background:var(--ink-3)}
+  .badge.live i{background:var(--green);animation:bl 1.2s infinite}@keyframes bl{50%{opacity:.35}}
+  @media(max-width:640px){.status .hide{display:none}}
+
+  .hero{padding:8px 0 6px}
+  .hero .ey{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:#7d9a12}
+  .hero h1{font-family:var(--disp);font-weight:900;font-size:clamp(24px,3.4vw,34px);letter-spacing:-.02em;margin:6px 0 0}
+  .hero p{color:var(--ink-2);margin:8px 0 0;font-size:14px;max-width:64ch}
+  .hero p b{color:var(--ink)}
+
+  /* glowing-node workflow (dark strip) */
+  .flow{margin:18px 0 0;background:radial-gradient(120% 160% at 30% -30%,#161b22,#0b0e13);border:1px solid #20262f;border-radius:18px;padding:26px 18px 20px;box-shadow:var(--sh-lg);overflow:hidden}
+  .flowrow{display:grid;grid-template-columns:repeat(6,1fr);align-items:start}
+  .fnode{position:relative;display:flex;flex-direction:column;align-items:center;text-align:center}
+  .fedge{position:absolute;top:52px;left:calc(-50% + 34px);width:calc(100% - 68px);height:2px;background:#242b35;overflow:hidden;border-radius:2px}
+  .fedge i{position:absolute;inset:0;transform:scaleX(0);transform-origin:left;transition:transform .6s ease;background:linear-gradient(90deg,transparent,var(--nc,#3b82f6))}
+  .fnode.done .fedge i,.fnode.on .fedge i{transform:scaleX(1)}
+  .fdot{width:60px;height:60px;border-radius:50%;display:flex;align-items:center;justify-content:center;position:relative;z-index:2;
+    background:#11151b;border:1.5px solid #2a323d;color:#8895a6;font-family:var(--mono);font-size:11px;transition:.35s}
+  .fnode.on .fdot{border-color:var(--nc);color:#fff;box-shadow:0 0 0 6px color-mix(in srgb,var(--nc) 22%,transparent),0 0 30px color-mix(in srgb,var(--nc) 55%,transparent);animation:pz 1.5s infinite}
+  .fnode.done .fdot{border-color:var(--nc);color:#eaeef4;box-shadow:0 0 18px color-mix(in srgb,var(--nc) 40%,transparent)}
+  @keyframes pz{0%,100%{box-shadow:0 0 0 6px color-mix(in srgb,var(--nc) 22%,transparent),0 0 26px color-mix(in srgb,var(--nc) 45%,transparent)}50%{box-shadow:0 0 0 10px color-mix(in srgb,var(--nc) 10%,transparent),0 0 40px color-mix(in srgb,var(--nc) 70%,transparent)}}
+  .flab{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;color:#8895a6;margin-bottom:12px;text-transform:uppercase}
+  .fnode.on .flab,.fnode.done .flab{color:#cfd7e2}
+  .fsub{font-family:var(--mono);font-size:9.5px;color:#5c6472;margin-top:9px;min-height:12px}
+  @media(max-width:760px){.flowrow{grid-template-columns:repeat(3,1fr);gap:22px 0}.fedge{display:none}}
+
+  .grid{display:grid;grid-template-columns:1fr 1.15fr;gap:16px;margin-top:16px;align-items:start}
+  @media(max-width:900px){.grid{grid-template-columns:1fr}}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:var(--sh)}
+  .ph{padding:12px 15px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:9px}
+  .ph h3{font-family:var(--disp);font-weight:700;font-size:13px;margin:0}
+  .ph .n{margin-left:auto;font-family:var(--mono);font-size:9.5px;color:var(--ink-3)}
+  .vmnote{font-family:var(--mono);font-size:9.5px;color:var(--amber);background:var(--amber-bg);border:1px solid rgba(217,142,31,.3);border-radius:999px;padding:3px 8px}
+
+  .feed{padding:8px 0;max-height:300px;overflow:auto;font-family:var(--mono);font-size:11.5px}
+  .feed .ln{display:flex;gap:9px;padding:4px 15px;opacity:0;transform:translateY(3px);animation:fi .25s forwards}
+  @keyframes fi{to{opacity:1;transform:none}}
+  .feed .ln .who{flex:0 0 auto;font-weight:600;min-width:64px}
+  .feed .ln .tx{color:var(--ink-2)}
+  .who.recon{color:var(--blue)}.who.triage{color:#0a84c0}.who.exploit{color:var(--red)}.who.patch{color:var(--amber)}.who.review{color:var(--violet)}.who.sys{color:var(--ink-3)}
+  .feed::-webkit-scrollbar{width:7px}.feed::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:7px}
+
+  .statrow{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:var(--sh);padding:12px 13px}
+  .stat .k{font-family:var(--mono);font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3)}
+  .stat .v{font-family:var(--disp);font-weight:800;font-size:24px;margin-top:5px;font-variant-numeric:tabular-nums}
+  .stat .v.red{color:var(--red)}.stat .v.green{color:var(--green)}
+
+  .finds{display:flex;flex-direction:column}
+  .find{border-top:1px solid var(--line)}.find:first-child{border-top:none}
+  .frow{display:flex;align-items:center;gap:10px;padding:11px 15px;cursor:pointer}
+  .frow .cl{font-weight:600;font-size:12.5px}
+  .frow .ep{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-left:6px}
+  .frow .st{margin-left:auto;display:flex;gap:6px}
+  .pill{font-family:var(--mono);font-size:8.5px;letter-spacing:.04em;text-transform:uppercase;padding:3px 8px;border-radius:999px;border:1px solid var(--line-2);color:var(--ink-3);background:#fff}
+  .pill.conf{color:var(--red);border-color:rgba(229,72,77,.3);background:var(--red-bg)}
+  .pill.cert{color:var(--green);border-color:rgba(35,161,92,.3);background:var(--green-bg)}
+  .pill.open{color:var(--amber);border-color:rgba(217,142,31,.3);background:var(--amber-bg)}
+  .car{color:var(--ink-3);font-size:11px;transition:transform .25s}.find.open .car{transform:rotate(90deg)}
+  .det{max-height:0;overflow:hidden;transition:max-height .35s cubic-bezier(.2,.7,.2,1)}
+  .find.open .det{max-height:420px}
+  .det .in{margin:0 15px 13px}
+  .leak{font-family:var(--mono);font-size:10.5px;color:var(--ink-2);background:var(--panel-2);border:1px solid var(--line);border-radius:9px;padding:8px 10px;margin-bottom:8px;word-break:break-word}
+  .leak b{color:var(--red)}
+  .diffbox{background:var(--scr);border-radius:10px;overflow:hidden}
+  .diffbox .dh{font-family:var(--mono);font-size:9.5px;color:var(--sdim);padding:7px 11px;border-bottom:1px solid #1c222c;display:flex;gap:8px;align-items:center}
+  .diffbox .dh .src{margin-left:auto;color:#9fb0c4}
+  .diffbox pre{margin:0;padding:9px 11px;font-family:var(--mono);font-size:10.5px;line-height:1.55;color:var(--sink);white-space:pre-wrap;word-break:break-word;max-height:230px;overflow:auto}
+  .diffbox pre .rm{color:#ff9098}.diffbox pre .ad{color:#7ee0a6}.diffbox pre .hd{color:var(--sdim)}
+  .rev{font-family:var(--mono);font-size:10px;color:var(--ink-2);margin-top:8px}
+  .empty{padding:26px 16px;text-align:center;color:var(--ink-3);font-family:var(--mono);font-size:12px}
+  .foot{padding:20px 0 40px;font-family:var(--mono);font-size:11px;color:var(--ink-3);text-align:center}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div class="brand"><span class="mk"><svg viewBox="0 0 24 24" width="15" height="15" fill="none"><path d="M5 12l4 4 10-11" stroke="#c8f23a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Cerberus</div>
+    <div class="repo"><span class="g">scan</span><select id="target"><option value="seeded_flask">seeded_flask</option><option value="snipstash">snipstash</option></select></div>
+    <button class="go" id="run"><span class="tri"></span><span id="rl">Run scan</span></button>
+    <div class="status"><span class="badge" id="model"><i></i> <span>reasoning idle</span></span><span class="badge live hide" id="conn" style="display:none"><i></i> live</span></div>
+  </div>
+
+  <div class="hero">
+    <div class="ey">Live · real scan</div>
+    <h1>Watch the real engine work</h1>
+    <p>This runs the actual finder on <b>Vultr Serverless Inference</b> — every finding, canary, patch and verdict below comes out of a real scan, streamed live. <b>Sandbox is a local process today; the live disposable VM is issue #16.</b></p>
+  </div>
+
+  <!-- glowing workflow -->
+  <div class="flow"><div class="flowrow" id="flow"></div></div>
+
+  <div class="grid">
+    <div class="panel">
+      <div class="ph"><h3>Sandbox</h3><span class="vmnote" id="vmnote">local · live VM pending #16</span><span class="n">agent activity</span></div>
+      <div class="feed" id="feed"><div class="empty" id="feed-empty">press Run — the real scan streams here</div></div>
+    </div>
+    <div>
+      <div class="statrow">
+        <div class="stat"><div class="k">Confirmed</div><div class="v red" id="s-conf">0</div></div>
+        <div class="stat"><div class="k">Certified</div><div class="v green" id="s-cert">0</div></div>
+        <div class="stat"><div class="k">Left the box</div><div class="v" id="s-blast">0 B</div></div>
+      </div>
+      <div class="panel">
+        <div class="ph"><h3>Findings</h3><span class="n" id="find-note">click a finding · the real leak &amp; patch</span></div>
+        <div class="finds" id="finds"><div class="empty" id="finds-empty">no findings yet</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="foot" id="foot">idle</div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var $=function(s,r){return (r||document).querySelector(s)};
+  var esc=function(s){return String(s==null?"":s).replace(/[&<>]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;"}[c];});};
+
+  var STAGES=[["recon","Recon","#3b82f6"],["triage","Triage","#0a84c0"],["exploit","Exploit","#e5484d"],["patch","Patch","#d98e1f"],["certify","Certify","#23a15c"],["contain","Contain","#7d9a12"]];
+  var flow=$("#flow");
+  STAGES.forEach(function(s,i){var n=document.createElement("div");n.className="fnode";n.id="fn_"+s[0];n.style.setProperty("--nc",s[2]);
+    n.innerHTML=(i>0?'<div class="fedge"><i></i></div>':'')+'<div class="flab">'+s[1]+'</div><div class="fdot">'+String(i+1).padStart(2,"0")+'</div><div class="fsub" id="fs_'+s[0]+'"></div>';flow.appendChild(n);});
+  function node(id,state,sub){var n=$("#fn_"+id);if(!n)return;n.classList.remove("on","done");if(state)n.classList.add(state);if(sub!=null)$("#fs_"+id).textContent=sub;}
+  function nodesReset(){STAGES.forEach(function(s){node(s[0],"","");});}
+
+  var feed=$("#feed");
+  function say(who,txt){var e=$("#feed-empty");if(e)e.remove();var d=document.createElement("div");d.className="ln";
+    d.innerHTML='<span class="who '+who+'">'+who+'</span><span class="tx">'+esc(txt)+'</span>';feed.appendChild(d);feed.scrollTop=feed.scrollHeight;}
+
+  var finds=$("#finds");
+  function fslug(c){return c.replace(/[^a-z0-9]+/gi,"_");}
+  function addFinding(ev){
+    var e=$("#finds-empty");if(e)e.remove();
+    var id="fi_"+fslug(ev.cls);
+    var d=document.createElement("div");d.className="find";d.id=id;
+    var leak=ev.canary?('planted secret <b>'+esc(ev.canary)+'</b> was observed leaving the box'):'confirmed by the canary oracle';
+    d.innerHTML='<div class="frow"><span class="cl">'+esc(ev.cls)+'</span><span class="ep">'+esc(ev.endpoint||"")+'</span>'+
+      '<span class="st"><span class="pill conf">confirmed</span><span class="pill open" id="'+id+'_st">patching…</span></span><span class="car">›</span></div>'+
+      '<div class="det"><div class="in"><div class="leak">↳ '+leak+'<br><span style="color:var(--ink-3)">'+esc(ev.chain||"")+'</span></div>'+
+      '<div class="diffbox" id="'+id+'_diff"><div class="dh">the patch <span class="src" id="'+id+'_src">writing…</span></div><pre id="'+id+'_pre">re-proving on a disposable copy…</pre></div>'+
+      '<div class="rev" id="'+id+'_rev"></div></div></div>';
+    finds.appendChild(d);
+    d.querySelector(".frow").addEventListener("click",function(){d.classList.toggle("open");});
+  }
+  function patchFinding(ev){
+    var id="fi_"+fslug(ev.cls);var st=$("#"+id+"_st"),src=$("#"+id+"_src"),pre=$("#"+id+"_pre"),rev=$("#"+id+"_rev");
+    if(st){st.textContent=ev.certified?"certified":"open";st.className="pill "+(ev.certified?"cert":"open");}
+    if(src)src.textContent=ev.patch_source||"patch";
+    if(pre){var diff=(ev.diff||"").trim();
+      if(diff){pre.innerHTML=diff.split("\n").map(function(l){var c=l[0]==="+"?"ad":l[0]==="-"?"rm":"hd";return '<span class="'+c+'">'+esc(l)+'</span>';}).join("\n");}
+      else pre.textContent="(no textual diff)";}
+    if(rev){var r=ev.review;rev.innerHTML=(ev.reexploit_blocked?'re-exploit → blocked · ':'')+(r?('independent reviewer ('+esc(r.model||"2nd model")+'): '+(r.closed?"closed":"open")+(r.over_blocks?", over-blocks":", no over-block")):(ev.validated?'static-validated':''));}
+  }
+
+  var ws=null,running=false;
+  function setRun(on){running=on;$("#run").disabled=on;$("#rl").textContent=on?"Scanning…":"Run again";$("#conn").style.display=on?"inline-flex":"none";}
+
+  function start(){
+    if(running)return;setRun(true);
+    nodesReset();feed.innerHTML="";finds.innerHTML="";
+    $("#s-conf").textContent="0";$("#s-cert").textContent="0";$("#s-blast").textContent="0 B";
+    $("#model").innerHTML='<i></i> <span>reasoning · Vultr</span>';$("#foot").textContent="dispatching…";
+    var target=$("#target").value;
+    try{ws=new WebSocket((location.protocol==="https:"?"wss://":"ws://")+location.host+"/scan");}
+    catch(e){say("sys","could not open a socket — is the demo server running? uvicorn demo_server:app");setRun(false);return;}
+    ws.onopen=function(){ws.send(JSON.stringify({target:target}));say("sys","dispatching "+target+" to the sandbox");};
+    ws.onmessage=function(m){var ev;try{ev=JSON.parse(m.data);}catch(_){return;}handle(ev);};
+    ws.onerror=function(){say("sys","socket error — run: uvicorn demo_server:app --port 8000, then open this page from that server");};
+    ws.onclose=function(){setRun(false);};
+  }
+
+  function handle(ev){
+    if(ev.type==="stage"){
+      if(ev.stage==="boot"){node("recon","on","");say("sys",ev.detail);}
+      else if(ev.stage==="recon"){node("recon","on",ev.detail);say("recon",ev.detail);}
+      else if(ev.stage==="destroy"){node("contain","done","destroyed");say("sys",ev.detail);$("#foot").textContent="done · sandbox destroyed";}
+    }
+    else if(ev.type==="triage"){
+      node("recon","done",(ev.classes||[]).length+" classes");node("triage","done",ev.source);
+      $("#model").innerHTML='<i></i> <span><b>'+esc(ev.source)+'</b></span>';
+      say("triage","ranked on "+ev.source+" · "+ev.found+" reachable to test");node("exploit","on","");
+    }
+    else if(ev.type==="exploit"){
+      node("exploit","on",ev.confirmed+" confirmed");
+      say("exploit","● "+ev.cls+"  "+(ev.endpoint||"")+" — canary "+(ev.canary||"")+" left the box");
+      $("#s-conf").textContent=ev.confirmed;addFinding(ev);
+    }
+    else if(ev.type==="patch"){
+      node("patch","on",ev.cls);
+      say("patch",ev.cls+" → "+(ev.patch_source||"patch")+(ev.reexploit_blocked?" · re-exploit blocked":""));
+      if(ev.review)say("review","independent: "+(ev.review.closed?"closed":"open")+(ev.review.over_blocks?", over-blocks":", no over-block"));
+      if(ev.certified){node("certify","on",ev.certified_count+" certified");$("#s-cert").textContent=ev.certified_count;}
+      patchFinding(ev);
+    }
+    else if(ev.type==="complete"){
+      node("exploit","done",ev.confirmed+" found");node("patch","done",ev.certified+" patched");
+      node("certify","done",ev.certified+"/"+ev.confirmed);node("contain","on","0 escaped");
+      $("#s-conf").textContent=ev.confirmed;$("#s-cert").textContent=ev.certified;$("#s-blast").textContent="0 B";
+      say("sys",ev.confirmed+" confirmed · "+ev.certified+" certified · blast radius 0 · reasoning "+ev.triage_source);
+      $("#foot").textContent=ev.confirmed+" confirmed · "+ev.certified+" certified on "+ev.triage_source;
+    }
+    else if(ev.type==="error"){say("sys","error: "+ev.message);$("#foot").textContent="scan error";}
+  }
+
+  $("#run").addEventListener("click",start);
+})();
+</script>
+</body>
+</html>
