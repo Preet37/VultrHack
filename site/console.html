@@ -424,7 +424,7 @@
   });
   var urlCard=$('[data-url]');
   if(urlCard)urlCard.addEventListener("click",function(){document.querySelectorAll(".rc").forEach(function(x){x.classList.remove("on")});
-    urlCard.classList.add("on");sel="";$("#repo").value="";$("#repo").placeholder="https://github.com/user/repo";$("#repo").focus();});
+    urlCard.classList.add("on");sel="";$("#repo").value="https://github.com/Preet37/ticketflow";$("#repo").placeholder="https://github.com/user/repo";$("#repo").focus();});
   $("#det").addEventListener("click",launch);
   $("#repo").addEventListener("keydown",function(e){if(e.key==="Enter")launch();});
 
