@@ -10,7 +10,7 @@ from fastapi import FastAPI, Header, HTTPException, Request, Response, WebSocket
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, SecretStr, StrictBool, StrictInt
 
-from instance_lifecycle import ReadySignals, validated_diagnostic_url
+from instance_lifecycle import ReadySignals, validated_presigned_nic_post
 from jobs import JobRegistry, SCAN_TARGETS, control_token
 
 app = FastAPI(title="Cerberus")
@@ -30,8 +30,7 @@ class JobRequest(BaseModel):
     approve_vm: StrictBool = False
     netbird_setup_key: SecretStr | None = None
     arm_token: SecretStr | None = None
-    diagnostic_url: str | None = None
-    diagnostic_token: SecretStr | None = None
+    diagnostic_upload: dict | None = None
     target: str | None = None
 
 
@@ -237,22 +236,17 @@ async def arm_sandbox_job(request: SandboxArmRequest, authorization: str | None 
 
 @app.post("/jobs", status_code=202)
 async def start_job(request: JobRequest, authorization: str | None = Header(default=None)):
-    trusted_token = require_control(authorization)
+    require_control(authorization)
     if request.type == "sandbox_smoke":
         if request.target is not None:
             raise HTTPException(status_code=400, detail="Sandbox jobs do not accept a target")
-        if (request.diagnostic_url is None) != (request.diagnostic_token is None):
-            raise HTTPException(status_code=400, detail="Diagnostic URL and token must be supplied together")
-        diagnostic_token = request.diagnostic_token.get_secret_value() if request.diagnostic_token is not None else None
-        if request.diagnostic_url is not None:
+        if request.diagnostic_upload is not None:
             if request.netbird_setup_key is not None or request.arm_token is None or os.getenv("CERBERUS_ENABLE_SANDBOX_JOBS") == "true":
-                raise HTTPException(status_code=400, detail="Public diagnostics require an armed VPC job")
+                raise HTTPException(status_code=400, detail="Presigned diagnostics require an armed VPC job")
             try:
-                validated_diagnostic_url(request.diagnostic_url)
+                validated_presigned_nic_post(request.diagnostic_upload)
             except ValueError:
-                raise HTTPException(status_code=400, detail="Public diagnostic URL is invalid")
-            if not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", diagnostic_token) or secrets.compare_digest(diagnostic_token, request.arm_token.get_secret_value()) or secrets.compare_digest(diagnostic_token, trusted_token):
-                raise HTTPException(status_code=400, detail="A distinct diagnostic token is required")
+                raise HTTPException(status_code=400, detail="Presigned NIC upload is invalid")
         enabled = os.getenv("CERBERUS_ENABLE_SANDBOX_JOBS") == "true"
         if not enabled and request.arm_token is None:
             raise HTTPException(status_code=503, detail="Sandbox jobs are disabled")
@@ -276,9 +270,9 @@ async def start_job(request: JobRequest, authorization: str | None = Header(defa
                 hold = job_registry.consume_sandbox_arm(request.arm_token.get_secret_value())
                 if hold is None:
                     raise HTTPException(status_code=403, detail="Sandbox arm is invalid or expired")
-                job = job_registry.create(request.type, None, ready_signals, vpc_mode=True, diagnostic_hold_seconds=hold, diagnostic_url=request.diagnostic_url, diagnostic_token=diagnostic_token)
+                job = job_registry.create(request.type, None, ready_signals, vpc_mode=True, diagnostic_hold_seconds=hold, diagnostic_upload=request.diagnostic_upload)
     elif request.type == "scan":
-        if request.approve_vm or request.netbird_setup_key is not None or request.arm_token is not None or request.diagnostic_url is not None or request.diagnostic_token is not None:
+        if request.approve_vm or request.netbird_setup_key is not None or request.arm_token is not None or request.diagnostic_upload is not None:
             raise HTTPException(status_code=400, detail="Scan jobs do not accept sandbox credentials")
         if request.target not in SCAN_TARGETS:
             raise HTTPException(status_code=400, detail="Unknown scan target")
@@ -286,7 +280,7 @@ async def start_job(request: JobRequest, authorization: str | None = Header(defa
             raise HTTPException(status_code=503, detail="Local scan jobs are disabled")
         job = job_registry.create(request.type, target=request.target)
     else:
-        if request.approve_vm or request.netbird_setup_key is not None or request.arm_token is not None or request.diagnostic_url is not None or request.diagnostic_token is not None:
+        if request.approve_vm or request.netbird_setup_key is not None or request.arm_token is not None or request.diagnostic_upload is not None:
             raise HTTPException(status_code=400, detail="Connectivity jobs do not accept sandbox credentials")
         if request.target is not None:
             raise HTTPException(status_code=400, detail="Connectivity jobs do not accept a target")

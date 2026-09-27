@@ -1,40 +1,31 @@
 import asyncio
 import base64
+import io
 import json
-import socket
+import re
+import secrets
 import threading
 import time
 from pathlib import Path
 
+import boto3
 import httpx
 import pytest
-import uvicorn
+from botocore.config import Config
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 import diagnostic_run
 import jobs
-from diagnostic_receiver import build_diagnostic_app
-from diagnostic_run import main as diagnostic_main, read_quick_tunnel_url, validated_operator_url
+from diagnostic_receiver import validated_nic_report
+from diagnostic_run import main as diagnostic_main, validated_operator_url
+from diagnostic_storage import presign_nic_post
 from main import app, vpc_callback_app
 
 CONTROL_TOKEN = "test-" + "x" * 40
 
 
-def test_quick_tunnel_url_is_validated_without_exposing_control_api():
-    async def parse():
-        reader = asyncio.StreamReader()
-        reader.feed_data(b"cloudflared starting\nhttps://valid.trycloudflare.com\n")
-        reader.feed_eof()
-        url = await read_quick_tunnel_url(reader)
-        spoof = asyncio.StreamReader()
-        spoof.feed_data(b"https://valid.trycloudflare.com.evil.example\n")
-        spoof.feed_eof()
-        with pytest.raises(RuntimeError):
-            await read_quick_tunnel_url(spoof)
-        return url
-
-    assert asyncio.run(parse()) == "https://valid.trycloudflare.com/internal/nic"
+def test_operator_url_is_validated_without_exposing_control_api():
     assert validated_operator_url("http://100.124.55.15:8000") == "http://100.124.55.15:8000"
     for url in ("http://64.177.8.46:8000", "https://100.124.55.15:8000", "http://100.124.55.15:8000/jobs", "http://user@100.124.55.15:8000", "http://100.124.55.15:8000\n"):
         with pytest.raises(ValueError):
@@ -87,110 +78,48 @@ def test_approved_diagnostic_runner_starts_one_mock_job_without_leaking_tokens(m
                 return httpx.Response(503, request=httpx.Request("POST", url))
             return httpx.Response(202, json={"id": "job-123"}, request=httpx.Request("POST", url))
 
-    class FakeServer:
-        started = True
-        should_exit = False
-
-        def __init__(self, config):
-            pass
-
-        async def serve(self, sockets):
-            while not self.should_exit:
-                await asyncio.sleep(0.01)
-
-    class FakeTunnel:
+    class FakeStorage:
         def __init__(self):
-            self.stderr = asyncio.StreamReader()
-            self.stderr.feed_data(b"Quick Tunnel: https://valid.trycloudflare.com\n")
-            self.stderr.feed_eof()
-            self.returncode = None
+            self.deleted = []
 
-        def terminate(self):
-            self.returncode = 0
+        def get_object(self, Bucket, Key):
+            return {"Body": io.BytesIO(b'{"probe":"ok","vpc_ip":"10.52.0.4"}'), "ContentType": "application/json"}
 
-        async def wait(self):
-            return self.returncode
+        def delete_object(self, Bucket, Key):
+            self.deleted.append(Key)
+
+    storage = FakeStorage()
+
+    def fake_s3(env_file):
+        return storage, "https://ewr1.vultrobjects.com", "cerberus-nic-demo"
+
+    def fake_presign(client, endpoint, bucket, key, expires_in):
+        assert expires_in == 900 and re.fullmatch(r"nic/[0-9a-f]{32}\.json", key)
+        return {"url": "https://cerberus-nic-demo.ewr1.vultrobjects.com/", "fields": {"key": key, "policy": "x"}}
 
     monkeypatch.setattr(diagnostic_run, "control_token", lambda: "C" * 43)
     monkeypatch.setattr(diagnostic_run, "load_keys", lambda: ("account-key", "inference-key"))
-    monkeypatch.setattr(diagnostic_run.shutil, "which", lambda name: "/fake/cloudflared")
     monkeypatch.setattr(diagnostic_run.httpx, "AsyncClient", lambda **kwargs: FakeClient())
-    monkeypatch.setattr(diagnostic_run.uvicorn, "Server", FakeServer)
-
-    async def start_tunnel(*args, **kwargs):
-        assert args[:3] == ("/fake/cloudflared", "tunnel", "--url")
-        return FakeTunnel()
-
-    monkeypatch.setattr(diagnostic_run.asyncio, "create_subprocess_exec", start_tunnel)
-    asyncio.run(diagnostic_run.run_approved_smoke("http://100.124.55.15:8000", vpc_id, "10.52.0.0/24", 300))
+    monkeypatch.setattr(diagnostic_run, "presign_nic_post", fake_presign)
+    asyncio.run(diagnostic_run.run_approved_smoke("http://100.124.55.15:8000", vpc_id, "10.52.0.0/24", 300, "/fake/.env", s3_factory=fake_s3))
     jobs_started = [body for method, url, body in calls if method == "POST" and url.endswith("/jobs") and body.get("approve_vm") is True]
     assert len(jobs_started) == 1
     assert jobs_started[0]["arm_token"] == "A" * 43
-    assert jobs_started[0]["diagnostic_url"] == "https://valid.trycloudflare.com/internal/nic"
-    assert len(jobs_started[0]["diagnostic_token"]) >= 32
+    assert set(jobs_started[0]["diagnostic_upload"]["fields"]) == {"key", "policy"}
+    assert len(storage.deleted) == 1
     output = capsys.readouterr().out
+    assert "Guest NIC probe completed: True" in output
+    assert "Provider-assigned VPC IP configured in guest: True" in output
     assert "Independent VX1 deletion confirmed: True" in output
-    assert jobs_started[0]["diagnostic_token"] not in output
     assert "account-key" not in output
 
 
-def test_public_diagnostic_receiver_works_on_localhost_socket_only():
-    async def request():
-        receiver, state = build_diagnostic_app("D" * 43, "10.52.0.0/24")
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.bind(("127.0.0.1", 0))
-        sock.listen(32)
-        sock.setblocking(False)
-        server = uvicorn.Server(uvicorn.Config(receiver, log_level="error", access_log=False))
-        task = asyncio.create_task(server.serve(sockets=[sock]))
-        try:
-            while not server.started:
-                if task.done():
-                    await task
-                await asyncio.sleep(0.01)
-            async with httpx.AsyncClient(timeout=5, trust_env=False) as client:
-                url = f"http://127.0.0.1:{sock.getsockname()[1]}/internal/nic"
-                headers = {"Authorization": "Bearer " + "D" * 43}
-                wrong = await client.post(url, json={"probe": "ok", "vpc_ip": None})
-                accepted = await client.post(url, headers=headers, json={"probe": "ok", "vpc_ip": None})
-                replay = await client.post(url, headers=headers, json={"probe": "ok", "vpc_ip": None})
-            assert (wrong.status_code, accepted.status_code, replay.status_code) == (404, 204, 404)
-            assert state.result == {"probe": "ok", "vpc_ip": None}
-        finally:
-            server.should_exit = True
-            await task
-            sock.close()
-
-    asyncio.run(request())
-
-
-def test_public_diagnostic_receiver_accepts_only_one_bounded_private_nic_report():
-    receiver, state = build_diagnostic_app("D" * 43, "10.52.0.0/24")
-    report = {"probe": "ok", "vpc_ip": "10.52.0.4"}
-    headers = {"Authorization": "Bearer " + "D" * 43}
-    with TestClient(receiver) as client:
-        assert client.get("/docs").status_code == 404
-        assert client.head("/internal/nic").status_code == 405
-        assert client.post("/jobs", headers=headers, json=report).status_code == 404
-        assert client.post("/internal/nic", json=report).status_code == 404
-        assert client.post("/internal/nic", headers={"Authorization": "Bearer wrong"}, json=report).status_code == 404
-        assert client.post("/internal/nic", headers=headers, content=b"x" * 257).status_code == 413
-        assert client.post("/internal/nic", headers=headers, json={**report, "secret": "not-allowed"}).status_code == 400
-        assert client.post("/internal/nic", headers=headers, json={"probe": "ok", "vpc_ip": "192.0.2.1"}).status_code == 400
-        assert client.post("/internal/nic", headers=headers, json={"probe": "ok", "vpc_ip": 171180036}).status_code == 400
-        assert client.post("/internal/nic", headers=headers, json={"probe": "unavailable", "vpc_ip": "10.52.0.4"}).status_code == 400
-        assert client.post("/internal/nic", headers=headers, json=report).status_code == 204
-        assert client.post("/internal/nic", headers=headers, json=report).status_code == 404
-    assert state.result == report
-    assert "D" * 43 not in str(state.result)
-
-
-@pytest.mark.parametrize("probe", ["ok", "unavailable"])
-def test_public_diagnostic_receiver_reports_absence_or_uncertainty(probe):
-    receiver, state = build_diagnostic_app("D" * 43, "10.52.0.0/24")
-    with TestClient(receiver) as client:
-        assert client.post("/internal/nic", headers={"Authorization": "Bearer " + "D" * 43}, json={"probe": probe, "vpc_ip": None}).status_code == 204
-    assert state.result == {"probe": probe, "vpc_ip": None}
+def test_nic_report_validation_is_shared_by_private_object_reads():
+    report = b'{"probe":"ok","vpc_ip":"10.52.0.4"}'
+    assert validated_nic_report(report, "10.52.0.0/24") == {"probe": "ok", "vpc_ip": "10.52.0.4"}
+    for invalid in (b'{"probe":"ok","vpc_ip":"192.0.2.1"}', b'{"probe":"ok","vpc_ip":171180036}', b'{"probe":"ok","vpc_ip":null,"secret":true}', b"x" * 257):
+        with pytest.raises(ValueError):
+            validated_nic_report(invalid, "10.52.0.0/24")
 
 
 def test_uvicorn_deployment_includes_websocket_protocol():
@@ -345,8 +274,8 @@ def test_vpc_sandbox_job_needs_no_setup_key_but_still_requires_explicit_approval
 def test_single_use_arm_starts_only_one_approved_vpc_job_with_gate_off(auth, monkeypatch, hold_seconds):
     seen = []
 
-    async def fake_smoke(job, key, signals, vpc_mode=False, diagnostic_hold_seconds=None, diagnostic_url=None, diagnostic_token=None):
-        seen.append((key, vpc_mode, diagnostic_hold_seconds, diagnostic_url, diagnostic_token))
+    async def fake_smoke(job, key, signals, vpc_mode=False, diagnostic_hold_seconds=None, diagnostic_upload=None):
+        seen.append((key, vpc_mode, diagnostic_hold_seconds, diagnostic_upload))
         job.result = {"destroyed": True}
         await job.publish("completed")
 
@@ -376,9 +305,7 @@ def test_single_use_arm_starts_only_one_approved_vpc_job_with_gate_off(auth, mon
         assert client.post("/jobs", headers=auth, json=body).status_code == 503
         assert client.post("/jobs", headers=auth, json={**body, "arm_token": "wrong"}).status_code == 403
         assert client.post("/jobs", headers=auth, json={**body, "arm_token": arm_token, "netbird_setup_key": "A" * 36}).status_code == 400
-        diagnostic = {"diagnostic_url": "https://valid.trycloudflare.com/internal/nic", "diagnostic_token": "D" * 43}
-        assert client.post("/jobs", headers=auth, json={**body, "arm_token": arm_token, **diagnostic, "diagnostic_url": "http://valid.trycloudflare.com/internal/nic"}).status_code == 400
-        start = client.post("/jobs", headers=auth, json={**body, "arm_token": arm_token, **diagnostic})
+        start = client.post("/jobs", headers=auth, json={**body, "arm_token": arm_token})
         assert start.status_code == 202
         assert wait_for_terminal(client, start.json()["id"], auth)["status"] == "completed"
         assert client.post("/jobs", headers=auth, json={**body, "arm_token": arm_token}).status_code == 403
@@ -388,9 +315,43 @@ def test_single_use_arm_starts_only_one_approved_vpc_job_with_gate_off(auth, mon
             events = [websocket.receive_json() for _ in range(2)]
     with TestClient(vpc_callback_app) as client:
         assert client.post("/jobs/arm-sandbox", headers=auth, json={"approve_vm": True}).status_code == 404
-    assert seen == [(None, True, hold_seconds, diagnostic["diagnostic_url"], diagnostic["diagnostic_token"])]
+    assert seen == [(None, True, hold_seconds, None)]
     assert arm_token not in str(result.json()) + str(events)
-    assert diagnostic["diagnostic_token"] not in str(result.json()) + str(events)
+
+
+def test_armed_vpc_job_accepts_only_a_bounded_presigned_nic_upload(auth, monkeypatch):
+    seen = []
+
+    async def fake_smoke(job, key, signals, vpc_mode=False, diagnostic_hold_seconds=None, diagnostic_upload=None):
+        seen.append((key, vpc_mode, diagnostic_upload))
+        job.result = {"destroyed": True}
+        await job.publish("completed")
+
+    client = boto3.client(
+        "s3", region_name="ord1", endpoint_url="https://ord1.vultrobjects.com",
+        aws_access_key_id="test-access", aws_secret_access_key="test-secret",
+        config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}),
+    )
+    form = presign_nic_post(client, "https://ord1.vultrobjects.com", "cerberus-nic-demo", "nic/" + "a" * 32 + ".json")
+    monkeypatch.delenv("CERBERUS_ENABLE_SANDBOX_JOBS", raising=False)
+    for name, value in (("CERBERUS_VPC_ID", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                        ("CERBERUS_CONTROL_INSTANCE_ID", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+                        ("CERBERUS_CONTROL_VPC_IP", "10.52.0.2"), ("CERBERUS_VPC_SUBNET", "10.52.0.0/24")):
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(jobs, "run_sandbox_smoke_job", fake_smoke)
+    with TestClient(app) as api:
+        armed = api.post("/jobs/arm-sandbox", headers=auth, json={"approve_vm": True})
+        assert armed.status_code == 201
+        body = {"type": "sandbox_smoke", "approve_vm": True, "arm_token": armed.json()["arm_token"]}
+        assert api.post("/jobs", headers=auth, json={**body, "diagnostic_upload": {**form, "url": "http://invalid.example/"}}).status_code == 400
+        started = api.post("/jobs", headers=auth, json={**body, "diagnostic_upload": form})
+        assert started.status_code == 202
+        assert wait_for_terminal(api, started.json()["id"], auth)["status"] == "completed"
+        assert api.post("/jobs", headers=auth, json={**body, "diagnostic_upload": form}).status_code == 403
+        result = api.get(f"/jobs/{started.json()['id']}/result", headers=auth)
+    assert seen == [(None, True, form)]
+    assert form["fields"]["policy"] not in result.text
+    assert "test-secret" not in result.text
 
 
 def test_sandbox_arm_expires_without_creating_a_job():

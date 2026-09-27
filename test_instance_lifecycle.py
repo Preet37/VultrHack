@@ -6,11 +6,28 @@ import subprocess
 import urllib.request
 import zlib
 
+import boto3
 import httpx
 import pytest
+from botocore.config import Config
 
-from instance_lifecycle import ReadySignals, VultrInstances, block_public_ssh_user_data, docker_user_data, temporary_instance, validated_diagnostic_url, verify_instance
+from instance_lifecycle import ReadySignals, VultrInstances, block_public_ssh_user_data, docker_user_data, temporary_instance, verify_instance
 from main import BOOTSTRAP_STAGES, app, callback_app, control_server_app, ready_signals, vpc_callback_app
+
+
+def build_fake_upload_form():
+    client = boto3.client(
+        "s3", region_name="ewr1", endpoint_url="https://ewr1.vultrobjects.com",
+        aws_access_key_id="test-access", aws_secret_access_key="test-secret",
+        config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}),
+    )
+    key = "nic/" + "a" * 32 + ".json"
+    return client.generate_presigned_post(
+        Bucket="cerberus-nic-demo", Key=key,
+        Fields={"Content-Type": "application/json"},
+        Conditions=[{"Content-Type": "application/json"}, ["content-length-range", 1, 4096]],
+        ExpiresIn=900,
+    )
 
 
 def unpack_vpc_payload(script):
@@ -105,22 +122,24 @@ def test_create_validation_error_redacts_credentials():
     assert "ready-token" not in str(error.value)
 
 
-def test_diagnostic_token_is_redacted_from_vultr_validation_errors():
+def test_presigned_diagnostic_policy_is_redacted_from_vultr_validation_errors():
+    form = build_fake_upload_form()
+    policy = form["fields"]["policy"]
+
     def respond(request):
-        return httpx.Response(400, json={"error": "Invalid diagnostic token " + "D" * 43 + " account-key"})
+        return httpx.Response(400, json={"error": "Invalid upload policy " + policy + " account-key"})
 
     async def request():
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
             await VultrInstances(client, "account-key").create(
                 "ord", "vx1-g-2c-8g-120s", 2284, "http://10.52.0.2:8001/internal/ready", "R" * 43,
                 opensandbox_spike=True, vpc_callback=True, vpc_subnet="10.52.0.0/24",
-                vpc_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-                diagnostic_url="https://valid.trycloudflare.com/internal/nic", diagnostic_token="D" * 43,
+                vpc_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", diagnostic_upload=form,
             )
 
     with pytest.raises(ValueError) as error:
         asyncio.run(request())
-    assert "D" * 43 not in str(error.value)
+    assert policy not in str(error.value)
     assert "account-key" not in str(error.value)
 
 
@@ -224,70 +243,6 @@ def test_vpc_callback_is_private_without_netbird_key_or_public_api():
         docker_user_data(url, "R" * 36, True, netbird_setup_key="A" * 36, vpc_callback=True, vpc_subnet="10.52.0.0/24")
 
 
-@pytest.mark.parametrize("url", [
-    "http://valid.trycloudflare.com/internal/nic",
-    "https://valid.trycloudflare.com:443/internal/nic",
-    "https://valid.trycloudflare.com/internal/nic?token=abc",
-    "https://user@valid.trycloudflare.com/internal/nic",
-    "https://trycloudflare.com/internal/nic",
-    "https://valid.trycloudflare.com.evil.example/internal/nic",
-    "https://127.0.0.1/internal/nic",
-    "https://valid.trycloudflare.com/internal/stage",
-    "https://valid.trycloudflare.com/internal/nic\n",
-])
-def test_public_diagnostic_url_rejects_unapproved_destinations(url):
-    with pytest.raises(ValueError, match="diagnostic"):
-        validated_diagnostic_url(url)
-
-
-def test_vpc_diagnostic_requires_its_own_token_and_https_url():
-    callback = "http://10.52.0.2:8001/internal/ready"
-    diagnostic = "https://valid.trycloudflare.com/internal/nic"
-    assert validated_diagnostic_url(diagnostic) == diagnostic
-    with pytest.raises(ValueError, match="diagnostic"):
-        docker_user_data(callback, "R" * 43, True, vpc_callback=True, vpc_subnet="10.52.0.0/24", diagnostic_url=diagnostic)
-    with pytest.raises(ValueError, match="diagnostic"):
-        docker_user_data(callback, "R" * 43, True, vpc_callback=True, vpc_subnet="10.52.0.0/24", diagnostic_token="D" * 43)
-    with pytest.raises(ValueError, match="diagnostic"):
-        docker_user_data(callback, "R" * 43, True, vpc_callback=True, vpc_subnet="10.52.0.0/24", diagnostic_url=diagnostic, diagnostic_token="short")
-
-
-@pytest.mark.parametrize("interfaces,expected", [
-    ([{"ifname": "ens7", "addr_info": [{"family": "inet", "local": "10.52.0.4"}]}], {"probe": "ok", "vpc_ip": "10.52.0.4"}),
-    ([{"ifname": "ens3", "addr_info": [{"family": "inet", "local": "198.51.100.10"}]}], {"probe": "ok", "vpc_ip": None}),
-    (None, {"probe": "unavailable", "vpc_ip": None}),
-])
-def test_vpc_diagnostic_bootstrap_runs_before_packages_with_bounded_payload(monkeypatch, interfaces, expected):
-    callback = "http://10.52.0.2:8001/internal/ready"
-    diagnostic = "https://valid.trycloudflare.com/internal/nic"
-    script = docker_user_data(callback, "R" * 43, True, vpc_callback=True, vpc_subnet="10.52.0.0/24", diagnostic_url=diagnostic, diagnostic_token="D" * 43)
-    assert script.index(diagnostic) < script.index("apt-get update")
-    assert subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True).returncode == 0
-    code = script.split("python3 - <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
-    seen = []
-
-    def check_output(command, **kwargs):
-        if command[:2] == ["ss", "-ltnH"]:
-            return ""
-        if interfaces is None:
-            raise FileNotFoundError
-        return json.dumps(interfaces)
-
-    def urlopen(request, timeout):
-        seen.append((request.full_url, json.loads(request.data), dict(request.header_items()), timeout))
-        if request.full_url.startswith("http://"):
-            raise OSError("private VPC callback unreachable")
-        return httpx.Response(204)
-
-    monkeypatch.setattr(subprocess, "check_output", check_output)
-    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
-    exec(compile(code, "<guest-nic-diagnostic>", "exec"), {})
-    assert seen[-1][0] == diagnostic
-    assert seen[-1][1] == expected
-    assert seen[-1][2]["Authorization"] == "Bearer " + "D" * 43
-    assert seen[-1][3] == 5
-
-
 def test_early_vpc_stage_reports_json_with_token_before_packages(monkeypatch):
     captured = {}
 
@@ -377,7 +332,7 @@ def test_vpc_smoke_provisioning_uses_private_callback_and_no_netbird_key():
             return await VultrInstances(client, "account-key").create(
                 "ord", "vx1-g-2c-8g-120s", 2284, "http://10.52.0.2:8001/internal/ready", "R" * 36,
                 opensandbox_spike=True, vpc_callback=True, vpc_subnet="10.52.0.0/24", vpc_id=vpc_id,
-                diagnostic_url="https://valid.trycloudflare.com/internal/nic", diagnostic_token="D" * 43,
+                diagnostic_upload=build_fake_upload_form(),
             )
 
     assert asyncio.run(request()) == "instance-123"
