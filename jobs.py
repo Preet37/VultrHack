@@ -4,7 +4,6 @@ import json
 import os
 import re
 import secrets
-import socket
 import subprocess
 import sys
 import time
@@ -133,14 +132,6 @@ SCAN_TARGETS = {
 }
 
 
-def _free_port():
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
-
-
 async def _await_health(base_url, timeout=25.0):
     deadline = time.monotonic() + timeout
     async with httpx.AsyncClient(timeout=2.0) as client:
@@ -154,15 +145,6 @@ async def _await_health(base_url, timeout=25.0):
     raise RuntimeError("target did not become healthy")
 
 
-def _stop_proc(proc):
-    proc.terminate()
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait(timeout=5)
-
-
 async def run_scan_job(job, target_name):
     """Full find -> prove -> patch -> re-prove loop over one seeded target.
 
@@ -172,7 +154,8 @@ async def run_scan_job(job, target_name):
     Inference or the offline fallback produced the plan.
     """
     from finder.pipeline import run_finder
-    from finder.remediate import remediate
+    from finder.recon import load_manifest
+    from finder.remediate import _stop, free_port, remediate
 
     source_dir = SCAN_TARGETS.get(target_name)
     if source_dir is None:
@@ -180,7 +163,11 @@ async def run_scan_job(job, target_name):
         await job.publish("failed", "start_target")
         return
 
-    port = _free_port()
+    # Start the target the same way remediate() does: honor the manifest's
+    # entrypoint (default app.py) so the two phases never disagree about how to
+    # boot the same target.
+    entrypoint = (load_manifest(str(source_dir)) or {}).get("entrypoint", "app.py")
+    port = free_port()
     base_url = f"http://127.0.0.1:{port}"
     # Strip CERBERUS_* canary overrides so the target plants its manifest-default
     # canaries -- the same values the oracle reads.
@@ -190,7 +177,7 @@ async def run_scan_job(job, target_name):
     try:
         await job.publish("running", "start_target")
         proc = subprocess.Popen(
-            [sys.executable, "app.py"],
+            [sys.executable, entrypoint],
             cwd=str(source_dir),
             env=env,
             stdout=subprocess.DEVNULL,
@@ -206,7 +193,19 @@ async def run_scan_job(job, target_name):
         certified = 0
         for finding in report.findings:
             await job.publish("running", f"patch_{finding.vuln_class}")
-            res = await asyncio.to_thread(remediate, finding, str(source_dir))
+            # A single remediation failure must not discard the finder's
+            # confirmed findings or the fixes already certified this run.
+            try:
+                res = await asyncio.to_thread(remediate, finding, str(source_dir))
+            except Exception:
+                remediations.append({
+                    "finding_id": finding.id,
+                    "vuln_class": finding.vuln_class,
+                    "certified": False,
+                    "error": "remediation raised before completing",
+                })
+                await job.publish("running", "open_" + finding.vuln_class)
+                continue
             certified += 1 if res.certified else 0
             remediations.append(res.to_dict())
             await job.publish("running", ("certified_" if res.certified else "open_") + finding.vuln_class)
@@ -227,7 +226,7 @@ async def run_scan_job(job, target_name):
         await job.publish("completed", "complete")
     finally:
         if proc is not None:
-            await asyncio.to_thread(_stop_proc, proc)
+            await asyncio.to_thread(_stop, proc)
 
 
 async def run_sandbox_smoke_job(job, setup_key, signals):

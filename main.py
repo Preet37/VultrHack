@@ -179,6 +179,8 @@ callback_app.add_api_route("/internal/control-ready", control_ready, methods=["P
 async def start_job(request: JobRequest, authorization: str | None = Header(default=None)):
     require_control(authorization)
     if request.type == "sandbox_smoke":
+        if request.target is not None:
+            raise HTTPException(status_code=400, detail="Sandbox jobs do not accept a target")
         if os.getenv("CERBERUS_ENABLE_SANDBOX_JOBS") != "true":
             raise HTTPException(status_code=503, detail="Sandbox jobs are disabled")
         if request.approve_vm is not True or request.netbird_setup_key is None:

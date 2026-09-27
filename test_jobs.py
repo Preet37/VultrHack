@@ -338,8 +338,10 @@ def test_scan_seeded_flask_runs_full_loop(auth):
         start = client.post("/jobs", json={"type": "scan", "target": "seeded_flask"}, headers=auth)
         assert start.status_code == 202
         job_id = start.json()["id"]
-        # A real scan boots the target and runs the whole loop; give it room.
-        for _ in range(600):
+        # A real scan boots the target and runs the whole loop (finder wall-clock
+        # cap plus five sequential patch/re-exploit cycles); give it ample room so
+        # a loaded CI box does not fail the assert while the scan is still healthy.
+        for _ in range(1800):
             if client.get(f"/jobs/{job_id}", headers=auth).json()["status"] in ("completed", "failed"):
                 break
             time.sleep(0.1)
