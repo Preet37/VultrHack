@@ -49,8 +49,13 @@ class InferenceClient:
     def available(self) -> bool:
         return bool(self._key)
 
-    def pick_model(self) -> str | None:
-        """Choose a tool-calling model from the live /models list."""
+    def pick_model(self, avoid: str | None = None) -> str | None:
+        """Choose a tool-calling model from the live /models list.
+
+        ``avoid`` steers selection away from a given model id when another is
+        available -- used so the independent patch reviewer runs on a different
+        model than the patch writer.
+        """
         if self._model:
             return self._model
         if not self.available:
@@ -67,13 +72,16 @@ class InferenceClient:
             self.last_error = f"model list failed: {exc}"
             return None
         chat_ids = [i for i in ids if not any(x in i.lower() for x in MODEL_EXCLUDE)]
+        # Prefer models other than `avoid`, but fall back to the full set if it is
+        # the only one available.
+        pool = [i for i in chat_ids if i != avoid] or chat_ids
         for pref in MODEL_PREFERENCE:
-            for i in chat_ids:
+            for i in pool:
                 if pref in i.lower():
                     self._model = i
                     return i
-        if chat_ids:
-            self._model = chat_ids[0]
+        if pool:
+            self._model = pool[0]
         return self._model
 
     def complete_json(self, system: str, user: str) -> dict | None:

@@ -12,6 +12,7 @@
   "acct_canary_env": "CERBERUS_ACCT_CANARY",
   "ssrf_canary": "SSRFCANARY-0f1e2d3c4b5a-INTERNAL-ONLY",
   "ssrf_canary_env": "CERBERUS_SSRF_CANARY",
+  "benign": {"path_traversal": "readme.txt"},
   "routes": [
     {"method": "GET", "path": "/", "inputs": []},
     {"method": "GET", "path": "/health", "inputs": []},

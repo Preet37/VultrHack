@@ -32,15 +32,19 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 
 from finder.canary import excerpt, first_match
+from finder.inference import InferenceClient
+from finder.model_patch import model_review, model_write_patch
 from finder.models import Finding
 from finder.patchers import _find_function, patch_source
 from finder.playbooks import confirmer_for
 from finder.recon import canaries_for, load_manifest
 
 # A legitimate input per class whose request must still succeed after the patch.
-# SSRF is omitted deliberately: there is no in-sandbox benign fetch to make (no
-# egress), so functional parity for it is not asserted here.
-_BENIGN = {"sqli": "1", "path_traversal": "readme.txt", "command_injection": "localhost", "auth_bypass": "1"}
+# path_traversal's benign filename is overridden per target from the manifest
+# (each seeded app serves a different legitimate file). SSRF uses a public URL: a
+# correct guard must not policy-block it (403); with no egress it may return 502,
+# which is fine -- only a 403 means the patch over-blocks a host it should allow.
+_BENIGN = {"sqli": "1", "path_traversal": "readme.txt", "command_injection": "localhost", "auth_bypass": "1", "ssrf": "http://example.com/"}
 
 
 def _sink_symbol(finding: Finding) -> str:
@@ -64,6 +68,8 @@ class RemediationResult:
     validated: bool = False
     validation_notes: str = ""
     validation_source: str = "static-validator (offline)"
+    patch_source: str = "deterministic-template"
+    independent_review: dict | None = None
     regression_test: str = ""
 
     @property
@@ -139,9 +145,14 @@ def _reexploit(finding: Finding, base: str, canaries: list[str], timeout: float)
     return True, f"{len(result.attempts)} exploit payload(s) replayed; canary not observed in any response"
 
 
-def _functional_ok(finding: Finding, base: str, canaries: list[str], timeout: float) -> bool:
-    """A legitimate request must still succeed after the patch."""
-    benign = _BENIGN.get(finding.vuln_class)
+def _functional_ok(finding: Finding, base: str, canaries: list[str], timeout: float, benign: str | None = None) -> bool:
+    """A legitimate request must still succeed after the patch.
+
+    ``benign`` overrides the per-class default -- path_traversal passes the
+    target's real legitimate filename (from the manifest) so the over-block check
+    is not vacuous on a target whose legit file is not the default name.
+    """
+    benign = benign if benign is not None else _BENIGN.get(finding.vuln_class)
     if benign is None:
         return True
     try:
@@ -156,6 +167,14 @@ def _functional_ok(finding: Finding, base: str, canaries: list[str], timeout: fl
         # It may still 404 if that file does not exist on this target; only a 403
         # (the guard's own rejection) means the patch over-blocks.
         return resp.status_code != 403
+    if finding.vuln_class == "ssrf":
+        # A legitimate public URL must ACTUALLY be fetched (200) after the patch.
+        # Requiring only "not 403" was vacuous: a patch that disables all outbound
+        # fetching returns 502 for everything and would pass. A 200 proves the fix
+        # both allows the legitimate host AND still fetches -- the only honest way
+        # to catch a maximal over-block. This needs egress to a real allowed host;
+        # without it, SSRF functional parity genuinely cannot be proven.
+        return resp.status_code == 200
     low = resp.text.lower()
     return resp.status_code == 200 and "traceback" not in low and "query error" not in low
 
@@ -248,8 +267,55 @@ def _regression_test(finding: Finding, canaries: list[str]) -> str:
     )
 
 
+def _diff(original: str, new_source: str, sink_file: str) -> str:
+    return "".join(
+        difflib.unified_diff(
+            original.splitlines(keepends=True),
+            new_source.splitlines(keepends=True),
+            fromfile=f"a/{sink_file}",
+            tofile=f"b/{sink_file}",
+        )
+    )
+
+
+def _try_patch(finding, source_dir, entrypoint, new_source, canaries, benign, timeout):
+    """Apply one candidate patch to a disposable copy and run the re-exploit + functional checks."""
+    with tempfile.TemporaryDirectory() as tmp:
+        dst = Path(tmp) / "target"
+        shutil.copytree(
+            source_dir,
+            dst,
+            ignore=shutil.ignore_patterns("__pycache__", "*.db", "docs", "app_secret.txt", ".pytest_cache", "tests"),
+        )
+        (dst / finding.sink_file).write_text(new_source)
+        port = free_port()
+        proc = _start_target(dst, entrypoint, port)
+        try:
+            base = f"http://127.0.0.1:{port}"
+            _wait_health(base, timeout)
+            blocked, evidence = _reexploit(finding, base, canaries, timeout)
+            func_ok = _functional_ok(finding, base, canaries, timeout, benign)
+        except Exception as exc:
+            # A candidate that does not even boot (e.g. a broken model patch) is
+            # simply not accepted; the caller falls back to the next candidate.
+            blocked, evidence, func_ok = False, f"patched app did not run: {exc}", False
+        finally:
+            _stop(proc)
+    return blocked, evidence, func_ok
+
+
 def remediate(finding: Finding, source_dir: str, *, timeout: float = 12.0) -> RemediationResult:
-    """Patch one confirmed finding on a disposable copy and prove the class is closed."""
+    """Patch one confirmed finding on a disposable copy and prove the class is closed.
+
+    Two patch sources compete: the deterministic AST patcher (proven for the
+    seeded shapes) and a model-written patch on Vultr Serverless Inference (for
+    arbitrary code). ``CERBERUS_PATCH_MODE=model`` tries the model first; the
+    default tries the deterministic patcher first and only calls the model if it
+    does not match. Whichever is tried, the re-exploit on a disposable copy is the
+    judge -- an unproven patch is discarded -- and a model-written patch must also
+    pass an INDEPENDENT model review (a different call than the writer), so the
+    writer never certifies its own work.
+    """
     result = RemediationResult(
         finding_id=finding.id,
         vuln_class=finding.vuln_class,
@@ -259,6 +325,7 @@ def remediate(finding: Finding, source_dir: str, *, timeout: float = 12.0) -> Re
     manifest = load_manifest(source_dir)
     canaries = canaries_for(manifest)
     entrypoint = (manifest or {}).get("entrypoint", "app.py")
+    benign = ((manifest or {}).get("benign") or {}).get(finding.vuln_class)  # per-target override; None -> class default
 
     sink_symbol = _sink_symbol(finding)
     if not sink_symbol:
@@ -272,41 +339,85 @@ def remediate(finding: Finding, source_dir: str, *, timeout: float = 12.0) -> Re
         result.validation_notes = f"could not read sink file {finding.sink_file}"
         return result
 
-    patch = patch_source(finding.vuln_class, sink_symbol, original)
-    if patch is None:
-        result.validation_notes = "no deterministic patch for this class/shape; a model-written patch is required"
+    client = InferenceClient()
+    mode = os.getenv("CERBERUS_PATCH_MODE", "deterministic").lower()
+    order = ["vultr-inference", "deterministic-template"] if mode == "model" else ["deterministic-template", "vultr-inference"]
+
+    def build(label):
+        if label == "deterministic-template":
+            return patch_source(finding.vuln_class, sink_symbol, original)
+        return model_write_patch(finding, sink_symbol, original, client)
+
+    attempts = []  # (label, patch, blocked, evidence, func_ok) -- one per candidate tried
+    accepted = None
+    for label in order:
+        patch = build(label)  # the model patch is only built when this label is reached
+        if patch is None:
+            continue
+        blocked, evidence, func_ok = _try_patch(finding, source_dir, entrypoint, patch.new_source, canaries, benign, timeout)
+        attempts.append((label, patch, blocked, evidence, func_ok))
+        if blocked and func_ok:
+            accepted = attempts[-1]
+            break
+
+    if not attempts:
+        result.validation_notes = "no patch produced: no deterministic patcher matched and no model patch was available"
         return result
+
+    # Report exactly one candidate so the diff, re-exploit evidence and functional
+    # result all describe the same patch: the accepted one, else the first tried.
+    label, patch, blocked, evidence, func_ok = accepted or attempts[0]
     result.patched = True
+    result.patch_source = label
     result.patch_description = patch.description
-    result.patch_diff = "".join(
-        difflib.unified_diff(
-            original.splitlines(keepends=True),
-            patch.new_source.splitlines(keepends=True),
-            fromfile=f"a/{finding.sink_file}",
-            tofile=f"b/{finding.sink_file}",
-        )
-    )
-
-    with tempfile.TemporaryDirectory() as tmp:
-        dst = Path(tmp) / "target"
-        shutil.copytree(
-            source_dir,
-            dst,
-            ignore=shutil.ignore_patterns("__pycache__", "*.db", "docs", "app_secret.txt", ".pytest_cache", "tests"),
-        )
-        (dst / finding.sink_file).write_text(patch.new_source)
-        port = free_port()
-        proc = _start_target(dst, entrypoint, port)
-        try:
-            base = f"http://127.0.0.1:{port}"
-            _wait_health(base, timeout)
-            result.reexploit_blocked, result.reexploit_evidence = _reexploit(finding, base, canaries, timeout)
-            result.functional_ok = _functional_ok(finding, base, canaries, timeout)
-        finally:
-            _stop(proc)
-
-    result.validated, result.validation_notes = _validate(finding, sink_symbol, patch.new_source)
+    result.patch_diff = _diff(original, patch.new_source, finding.sink_file)
+    result.reexploit_blocked = blocked
+    result.reexploit_evidence = evidence
+    result.functional_ok = func_ok
     result.regression_test = _regression_test(finding, canaries)
+
+    static_ok, static_note = _validate(finding, sink_symbol, patch.new_source)
+    if label == "vultr-inference":
+        # A model wrote this patch. Do NOT require the deterministic static-template
+        # check -- it only recognizes the seeded shapes, so it would reject valid
+        # patches for arbitrary code (the whole point of the model patcher). The
+        # gate is instead: re-exploit blocked + functional preserved + an
+        # INDEPENDENT model reviewer (a different model than the writer) agreeing
+        # the class is closed and the fix does not over-block. The re-exploit stays
+        # the only fully independent judge.
+        if not (blocked and func_ok):
+            result.validated = False
+            result.validation_source = "not certified — patch did not close the class or broke functionality"
+            result.validation_notes = static_note
+        else:
+            review = model_review(finding, sink_symbol, patch.new_source, avoid_model=getattr(client, "_model", None))
+            result.independent_review = review
+            if review is not None:
+                # An explicit independent verdict decides -- a dissent (not closed,
+                # or over-blocks) blocks certification even if static analysis is
+                # happy, so the reviewer is never overruled.
+                result.validated = review["closed"] and not review["over_blocks"]
+                result.validation_source = "re-exploit + independent " + review["model"]
+                note = "reviewer: " + review["reason"]
+                result.validation_notes = (static_note + "; " + note) if static_ok else note
+            elif static_ok:
+                # No reviewer available (transient), but the static analyzer -- which
+                # is independent of the model writer -- recognizes the fix. That is a
+                # valid independent certification of a recognized shape.
+                result.validated = True
+                result.validation_source = "static-validator (independent of the model writer)"
+                result.validation_notes = static_note + "; independent model review unavailable, fell back to static analysis"
+            else:
+                result.validated = False
+                result.validation_source = "independent review UNAVAILABLE"
+                result.validation_notes = "no independent reviewer and static analysis does not recognize the fix — not certified"
+    else:
+        # Deterministic patch: the writer is code, and the static AST check plus
+        # the re-exploit are already independent of any model.
+        result.validated = static_ok
+        result.validation_notes = static_note
+        result.validation_source = "static-validator (offline)"
+
     return result
 
 
