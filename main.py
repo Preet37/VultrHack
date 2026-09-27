@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, SecretStr
 
 from instance_lifecycle import ReadySignals
-from jobs import JobRegistry, control_token
+from jobs import JobRegistry, SCAN_TARGETS, control_token
 
 app = FastAPI(title="Cerberus")
 ready_signals = ReadySignals()
@@ -26,9 +26,10 @@ BOOTSTRAP_STAGES = frozenset({
 
 
 class JobRequest(BaseModel):
-    type: Literal["connectivity", "sandbox_smoke"]
+    type: Literal["connectivity", "sandbox_smoke", "scan"]
     approve_vm: bool = False
     netbird_setup_key: SecretStr | None = None
+    target: str | None = None
 
 
 def require_control(authorization):
@@ -213,6 +214,8 @@ async def control_server_app(scope, receive, send):
 async def start_job(request: JobRequest, authorization: str | None = Header(default=None)):
     require_control(authorization)
     if request.type == "sandbox_smoke":
+        if request.target is not None:
+            raise HTTPException(status_code=400, detail="Sandbox jobs do not accept a target")
         if os.getenv("CERBERUS_ENABLE_SANDBOX_JOBS") != "true":
             raise HTTPException(status_code=503, detail="Sandbox jobs are disabled")
         if request.approve_vm is not True:
@@ -226,9 +229,19 @@ async def start_job(request: JobRequest, authorization: str | None = Header(defa
             if not all(os.getenv(name) for name in ("CERBERUS_VPC_ID", "CERBERUS_CONTROL_INSTANCE_ID", "CERBERUS_CONTROL_VPC_IP", "CERBERUS_VPC_SUBNET")):
                 raise HTTPException(status_code=503, detail="VPC sandbox jobs are not configured")
             job = job_registry.create(request.type, None, ready_signals, vpc_mode=True)
+    elif request.type == "scan":
+        if request.approve_vm or request.netbird_setup_key is not None:
+            raise HTTPException(status_code=400, detail="Scan jobs do not accept sandbox credentials")
+        if request.target not in SCAN_TARGETS:
+            raise HTTPException(status_code=400, detail="Unknown scan target")
+        if os.getenv("CERBERUS_ENABLE_LOCAL_SCAN_JOBS") != "true":
+            raise HTTPException(status_code=503, detail="Local scan jobs are disabled")
+        job = job_registry.create(request.type, target=request.target)
     else:
         if request.approve_vm or request.netbird_setup_key is not None:
             raise HTTPException(status_code=400, detail="Connectivity jobs do not accept sandbox credentials")
+        if request.target is not None:
+            raise HTTPException(status_code=400, detail="Connectivity jobs do not accept a target")
         job = job_registry.create(request.type)
     if job is None:
         raise HTTPException(status_code=429, detail="Too many active jobs")

@@ -129,11 +129,21 @@ The OpenAI-compatible variables are reserved for later SDK calls; the current co
 
 Set a separate `CERBERUS_CONTROL_TOKEN` of at least 32 random characters in the ignored, owner-only `.env`. Generate one locally with Python's `secrets.token_urlsafe(32)` and copy it using your editor; never reuse a Vultr key, commit the token, or embed it in a public frontend. Until it is configured, job endpoints return 503. REST calls require `Authorization: Bearer <control token>`.
 
-- `POST /jobs` with `{"type":"connectivity"}` returns 202 and a job ID. This is the only supported job type and performs read-only `/models`, `/account`, and `/regions` checks from the control process; it never runs repository code or creates instances.
+- `POST /jobs` with `{"type":"connectivity"}` returns 202 and a job ID. It performs read-only `/models`, `/account`, and `/regions` checks from the control process; it never runs repository code or creates instances.
 - `GET /jobs/{id}` reports `queued`, `running`, `completed`, or `failed`. `GET /jobs/{id}/result` returns 202 while pending, a successful model list and region count when complete, or a generic 502 on upstream failure. Upstream errors and tokens are not returned to clients.
 - `WS /jobs/{id}/events` replays earlier events and streams new ones. Authenticate with the **first WebSocket JSON message** `{"token":"<control token>"}`, not a URL query parameter. Use WSS if deployed remotely.
 
 Jobs and events are bounded and held **in memory only**: a process restart loses them, and this prototype runs in a single trusted controller process, locally or on the private VX1. A public browser UI needs proper session authentication before it can safely use these endpoints.
+
+## Scan API (the find → prove → patch → certify loop over HTTP)
+
+The end-to-end engine — recon, static sweep, triage, canary-confirmed exploit, patch on a disposable copy, re-exploit, functional check, static validation, and a certified-closed verdict — has a token-protected scan job for a **trusted local demo**. It is disabled by default and returns 503 unless `CERBERUS_ENABLE_LOCAL_SCAN_JOBS=true`. **Do not enable this flag on the persistent control VX1 or any machine holding production credentials:** the current demo starts a deliberately vulnerable target as a subprocess under the same OS user. The product scan path must move target execution into a disposable gVisor sandbox before being enabled on the control plane.
+
+- When explicitly enabled in a credential-free local demo environment, `POST /jobs` with `{"type":"scan","target":"seeded_flask"}` (or `"snipstash"`) returns 202 and a job ID. `target` is a **name resolved against a fixed allowlist**, never a path or URL; this does not make running that vulnerable target on the control VX1 safe. Arbitrary repositories are not accepted, and wiring target execution into the disposable gVisor sandbox is still required.
+- `GET /jobs/{id}/result` returns `{confirmed_findings, certified_closed, findings[], remediations[], coverage, triage_source}`. `triage_source` is `vultr-inference:<model>` when a Vultr Serverless Inference key is set, or `offline-heuristic` on the deterministic fallback — a run never implies the model ran when it did not.
+- `WS /jobs/{id}/events` streams a step per phase: `finding`, `confirmed_<n>`, `patch_<class>`, `certified_<class>` / `open_<class>`, `complete`.
+
+Verified end-to-end via the control API on the seeded targets: **5 confirmed, 5 certified closed, all five classes**, on both `offline-heuristic` and live `vultr-inference:deepseek-v4-flash-0731`. A single remediation failure is recorded against that finding without discarding the rest of the run. Only one scan runs at a time.
 
 ## Persistent control-plane VX1 (live)
 
