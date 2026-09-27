@@ -805,6 +805,25 @@ def test_microsandbox_target_user_data_uses_kvm_microvm_not_docker():
     assert "account-key" not in expanded and "netbird up" not in expanded
 
 
+def test_entrypoint_module_form_boots_uvicorn_and_plain_form_stays_python():
+    from instance_lifecycle import _entrypoint_json, validate_entrypoint
+    validate_entrypoint("app.py")
+    validate_entrypoint("main:app")
+    for bad in ("../x.py", "x; rm", "", "a:b:c:app"):
+        with pytest.raises(ValueError):
+            validate_entrypoint(bad)
+    assert json.loads(_entrypoint_json("app.py", 8081)) == ["python", "app.py"]
+    assert json.loads(_entrypoint_json("main:app", 8081)) == ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8081"]
+    script = docker_user_data(
+        "http://10.52.0.2:8001/internal/ready", "R" * 43,
+        vpc_callback=True, vpc_subnet="10.52.0.0/24",
+        target_run={"source_url": TARGET_SOURCE_URL, "entrypoint": "main:app"},
+    )
+    expanded = unpack_vpc_payload(script)
+    assert '"-m", "uvicorn", "main:app"' in expanded
+    assert subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True).returncode == 0
+
+
 def test_target_run_keeps_the_presigned_nic_probe_within_budget():
     script = docker_user_data(
         "http://10.52.0.2:8001/internal/ready", "R" * 43,

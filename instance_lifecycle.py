@@ -90,10 +90,36 @@ def validated_presigned_source_get(url):
     return url
 
 
+def validate_entrypoint(entrypoint):
+    if not isinstance(entrypoint, str) or ".." in entrypoint:
+        raise ValueError("Target entrypoint must be a single bounded source file name")
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", entrypoint):
+        return
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*:[A-Za-z_][A-Za-z0-9_]*", entrypoint):
+        return
+    raise ValueError("Target entrypoint must be a single bounded source file name")
+
+
+def _entrypoint_args(entrypoint, port):
+    if ":" not in entrypoint:
+        return ["python", entrypoint]
+    module, app = entrypoint.split(":", 1)
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", module) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", app):
+        raise ValueError("Module entrypoint must be module:app")
+    return ["python", "-m", "uvicorn", entrypoint, "--host", "0.0.0.0", "--port", str(port)]
+
+
+def _entrypoint_json(entrypoint, port):
+    return json.dumps(_entrypoint_args(entrypoint, port))
+
+
+def entrypoint_shell_command(entrypoint, port):
+    return " ".join(shlex.quote(item) for item in _entrypoint_args(entrypoint, port))
+
+
 def target_run_user_data(source_url, entrypoint, vpc_subnet):
     validated_presigned_source_get(source_url)
-    if not isinstance(entrypoint, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", entrypoint) or ".." in entrypoint:
-        raise ValueError("Target entrypoint must be a single bounded source file name")
+    validate_entrypoint(entrypoint)
     subnet = validated_vpc_subnet(vpc_subnet)
     network = str(subnet.network_address)
     broadcast = str(subnet.broadcast_address)
@@ -111,10 +137,10 @@ def target_run_user_data(source_url, entrypoint, vpc_subnet):
         "FROM python:3.12-slim\n"
         "WORKDIR /app\n"
         "COPY . /app\n"
-        "RUN pip install --no-cache-dir --disable-pip-version-check -r requirements.txt && python -c 'import flask' && touch /app/DEPS_OK\n"
+        "RUN pip install --no-cache-dir --disable-pip-version-check -r requirements.txt && touch /app/DEPS_OK\n"
         f"ENV PORT={port} PYTHONPATH=/app\n"
         f"EXPOSE {port}\n"
-        f'ENTRYPOINT ["python", "{entrypoint}"]\n'
+        f'ENTRYPOINT {_entrypoint_json(entrypoint, port)}\n'
         "DOCKERFILE\n"
         "cat > /root/target/sitecustomize.py <<'PYEOF'\n"
         "# Deployment plumbing only: the seeded targets bind the Flask dev server to\n"
@@ -178,8 +204,7 @@ MICROSANDBOX_INSTALLER_SHA256 = "767df6954e09fec9bf8276cc2858fc9038024b3a22fa474
 
 def microsandbox_run_user_data(source_url, entrypoint, vpc_subnet):
     validated_presigned_source_get(source_url)
-    if not isinstance(entrypoint, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", entrypoint) or ".." in entrypoint:
-        raise ValueError("Target entrypoint must be a single bounded source file name")
+    validate_entrypoint(entrypoint)
     subnet = validated_vpc_subnet(vpc_subnet)
     network = str(subnet.network_address)
     broadcast = str(subnet.broadcast_address)
@@ -224,7 +249,7 @@ def microsandbox_run_user_data(source_url, entrypoint, vpc_subnet):
         f"msb create --name cerberus-target --replace --cpus 1 --memory 1024M --copy-dir /root/target:/app --port \"$vpc_ip\":{port}:{port} python\n"
         f"command -v iptables >/dev/null 2>&1 && iptables -I INPUT -p tcp -s {subnet} --dport {port} -j ACCEPT || :\n"
         "cerberus_report_stage target_start\n"
-        f"msb exec cerberus-target -- bash -c 'cd /app && pip install -q -r requirements.txt && (nohup env PORT={port} PYTHONPATH=/app python {entrypoint} >/tmp/target.log 2>&1 & echo started)'\n"
+        f"msb exec cerberus-target -- bash -c 'cd /app && pip install -q -r requirements.txt && (nohup env PORT={port} PYTHONPATH=/app {' '.join(_entrypoint_args(entrypoint, port))} >/tmp/target.log 2>&1 & echo started)'\n"
         "cerberus_report_stage target_health\n"
         f"for attempt in $(seq 1 90); do if curl -fsS --max-time 5 \"http://$vpc_ip:{port}/health\" >/dev/null 2>&1; then break; fi; sleep 3; done\n"
         f"if ! curl -fsS --max-time 10 \"http://$vpc_ip:{port}/health\" >/dev/null; then\n"
