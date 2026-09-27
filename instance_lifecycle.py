@@ -364,6 +364,7 @@ def docker_user_data(callback_url, ready_token, opensandbox_spike=False, netbird
         "apt-get update\n"
         "apt-get install -y runsc\n"
         "runsc install\n"
+        "systemctl restart docker\n"
     )
     if private_callback or vpc_callback:
         script += "cerberus_report_stage runtime_smoke\n"
