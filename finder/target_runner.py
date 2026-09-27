@@ -6,7 +6,7 @@ small interface is what lets the scan move from "runs on the control host" to
 "runs in a throwaway VM" by swapping one object -- no change to the find, prove,
 patch or certify logic.
 
-Two implementations:
+Three implementations:
 
   - ``LocalSubprocessRunner`` boots the target as a local process on the control
     host. This is Tier-1 "in-process" isolation from the Blast Radius Zero brief
@@ -19,11 +19,14 @@ Two implementations:
     needs from the sandbox host are defined here. It is wired the moment that
     host exposes a "run this app, return a private URL, destroy it" primitive.
 
-Note the division of labour: static analysis and patching stay on the control
-plane against the *local* source (the control plane owns the repo); only target
-*execution* is dispatched into the sandbox. That matches the brief's
-architecture -- the repo never leaves the control plane, only the running app is
-isolated.
+  - ``MicrosandboxTargetRunner`` is a separate opt-in contract for a disposable
+    Vultr VX1 running Microsandbox microVMs. It is not the gVisor smoke path and
+    fails closed without an injected, trusted remote backend (see README).
+
+Note the division of labour: static analysis and patching use the local source
+on the control plane. A future remote backend must transfer a bounded source
+copy to its disposable guest to execute it there; the current remediation proof
+loop still executes patched copies locally and is NOT safe for untrusted repos.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ import os
 from pathlib import Path
 from typing import Callable, Protocol
 
+from finder.microsandbox_backend import MicrosandboxBackend, MicrosandboxLimits, MicrosandboxTargetRunner
 from finder.remediate import _start_target, _stop, _wait_health, free_port
 
 
@@ -126,8 +130,14 @@ def make_runner(
     entrypoint: str = "app.py",
     mode: str | None = None,
     dispatch: SandboxDispatch | None = None,
+    *,
+    microsandbox_backend: MicrosandboxBackend | None = None,
+    microsandbox_limits: MicrosandboxLimits | None = None,
 ) -> TargetRunner:
-    """Pick a runner. Default ``local``; ``sandbox`` selects the disposable-VM path.
+    """Pick a runner. ``microsandbox`` explicitly selects the separate VX1 seam.
+
+    Default ``local`` and ``sandbox`` (gVisor) retain their existing behavior.
+    Microsandbox has its own injected backend; the gVisor dispatch is not reused.
 
     ``mode`` falls back to the ``CERBERUS_SCAN_RUNNER`` environment variable, then
     to ``local``. An unknown mode is an error rather than a silent default, so a
@@ -136,6 +146,8 @@ def make_runner(
     mode = (mode or os.getenv("CERBERUS_SCAN_RUNNER") or "local").lower()
     if mode == "sandbox":
         return SandboxTargetRunner(source_dir, entrypoint, dispatch=dispatch)
+    if mode == "microsandbox":
+        return MicrosandboxTargetRunner(source_dir, entrypoint, backend=microsandbox_backend, limits=microsandbox_limits)
     if mode == "local":
         return LocalSubprocessRunner(source_dir, entrypoint)
     raise ValueError(f"unknown scan runner mode: {mode!r}")
