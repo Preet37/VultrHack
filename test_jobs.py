@@ -451,3 +451,48 @@ def test_websocket_requires_first_message_not_query_token(auth):
             with pytest.raises(WebSocketDisconnect) as error:
                 websocket.receive_json()
         assert error.value.code == 1008
+
+
+# --- Scan job: the full find -> prove -> patch -> re-prove loop over a web API ---
+
+def test_scan_rejects_unknown_target(auth):
+    with TestClient(app) as client:
+        resp = client.post("/jobs", json={"type": "scan", "target": "../etc"}, headers=auth)
+        assert resp.status_code == 400
+        # No target at all is also rejected: the endpoint takes a name, not a path.
+        assert client.post("/jobs", json={"type": "scan"}, headers=auth).status_code == 400
+
+
+def test_scan_rejects_sandbox_credentials(auth):
+    with TestClient(app) as client:
+        resp = client.post(
+            "/jobs",
+            json={"type": "scan", "target": "seeded_flask", "approve_vm": True},
+            headers=auth,
+        )
+        assert resp.status_code == 400
+
+
+def test_scan_seeded_flask_runs_full_loop(auth):
+    with TestClient(app) as client:
+        start = client.post("/jobs", json={"type": "scan", "target": "seeded_flask"}, headers=auth)
+        assert start.status_code == 202
+        job_id = start.json()["id"]
+        # A real scan boots the target and runs the whole loop (finder wall-clock
+        # cap plus five sequential patch/re-exploit cycles); give it ample room so
+        # a loaded CI box does not fail the assert while the scan is still healthy.
+        for _ in range(1800):
+            if client.get(f"/jobs/{job_id}", headers=auth).json()["status"] in ("completed", "failed"):
+                break
+            time.sleep(0.1)
+        status = client.get(f"/jobs/{job_id}", headers=auth).json()["status"]
+        assert status == "completed", f"scan did not complete: {status}"
+        result = client.get(f"/jobs/{job_id}/result", headers=auth).json()
+        assert result["confirmed_findings"] == 5
+        assert result["certified_closed"] == 5
+        assert {f["vuln_class"] for f in result["findings"]} == {
+            "sqli", "path_traversal", "command_injection", "ssrf", "auth_bypass"
+        }
+        # The report must record which brain produced the plan (Vultr inference or
+        # the offline fallback) so a run never implies the model ran when it did not.
+        assert result["triage_source"]
