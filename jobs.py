@@ -526,7 +526,8 @@ async def run_sandbox_scan_job(job, target_name, signals, target_runtime="gvisor
     source_dir = SCAN_TARGETS.get(target_name) if target_name is not None else None
     repo_cleanup = None
     if repo is not None:
-        source_dir, repo_cleanup = resolve_scan_source(repo)
+        resolved, repo_cleanup = resolve_scan_source(repo)
+        source_dir = Path(resolved)
     instance_id = None
     token = None
     failure_stage = None
