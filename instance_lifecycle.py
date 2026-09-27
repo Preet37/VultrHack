@@ -133,7 +133,7 @@ def target_run_user_data(source_url, entrypoint, vpc_subnet):
         "    Flask.run = _run\n"
         "PYEOF\n"
         "docker build -t cerberus-target /root/target >/root/cerberus-build.log 2>&1 || { tail -c 240 /root/cerberus-build.log | tr -cd '[:print:] ' > /root/cerberus-detail; false; }\n"
-        "docker run --rm --entrypoint python cerberus-target -c 'import flask' 2>/dev/null || { echo flask-import-probe-failed > /root/cerberus-detail; false; }\n"
+        "probe_out=$(docker run --rm --entrypoint python cerberus-target -c 'import flask' 2>&1) || { printf 'flask-probe:%s' \"$(printf %s \"$probe_out\" | tail -c 200 | tr -cd '[:print:] ')\" > /root/cerberus-detail; false; }\n"
         "cerberus_report_stage target_start\n"
         "vpc_ip=$(python3 - <<'PY'\n"
         "import ipaddress\nimport json\nimport subprocess\n"
