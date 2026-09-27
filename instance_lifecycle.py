@@ -35,7 +35,12 @@ def validated_vpc_subnet(value):
     return subnet
 
 
-def block_public_ssh_user_data():
+def block_public_ssh_user_data(stage_url=None, ready_token=None):
+    progress = (
+        "import urllib.request as u\n"
+        f"try:u.urlopen(u.Request({stage_url!r},b'{{\"stage\":\"bootstrap_started\"}}',{{'Authorization':{'Bearer ' + ready_token!r},'Content-Type':'application/json'}}),timeout=5).close()\n"
+        "except Exception:pass\n"
+    ) if stage_url is not None else ""
     return (
         "systemctl stop ssh.socket ssh.service\n"
         "systemctl mask ssh.socket ssh.service\n"
@@ -44,6 +49,7 @@ def block_public_ssh_user_data():
         "listeners = subprocess.check_output(['ss', '-ltnH'], text=True).splitlines()\n"
         "if any(line.split()[3].rsplit(':', 1)[-1] == '22' for line in listeners):\n"
         "    raise SystemExit('OpenSSH port 22 remains listening')\n"
+        f"{progress}"
         "PY\n"
     )
 
@@ -121,7 +127,7 @@ def docker_user_data(callback_url, ready_token, opensandbox_spike=False, netbird
     script = (
         "#!/bin/sh\n"
         "set -eu\n"
-        f"{block_public_ssh_user_data()}"
+        f"{block_public_ssh_user_data(callback_url.replace('/internal/ready', '/internal/stage') if vpc_callback else None, ready_token if vpc_callback else None)}"
         "test -c /dev/kvm\n"
         "test -r /dev/kvm\n"
         "test -w /dev/kvm\n"
@@ -136,6 +142,7 @@ def docker_user_data(callback_url, ready_token, opensandbox_spike=False, netbird
 
         script += netbird_enrollment_user_data(netbird_setup_key)
     if private_callback or vpc_callback:
+        script += f"CERBERUS_AUTH_HEADER={shlex.quote(f'Authorization: Bearer {ready_token}')}\n"
         failure_url = callback_url.replace("/internal/ready", "/internal/failed")
         progress_url = callback_url.replace("/internal/ready", "/internal/stage")
         script += (
@@ -147,20 +154,18 @@ def docker_user_data(callback_url, ready_token, opensandbox_spike=False, netbird
             "        if [ \"$CERBERUS_STAGE\" = isolation_probe ] && [ -s /root/cerberus-stage ]; then\n"
             "            CERBERUS_STAGE=$(cat /root/cerberus-stage)\n"
             "        fi\n"
-            f"        printf '{{\"stage\":\"%s\",\"exit_code\":%s}}' \"$CERBERUS_STAGE\" \"$result\" | curl -fsS --max-time 10 -X POST -H {shlex.quote(f'Authorization: Bearer {ready_token}')} -H 'Content-Type: application/json' --data-binary @- {shlex.quote(failure_url)} >/dev/null 2>&1 || :\n"
+            f"        printf '{{\"stage\":\"%s\",\"exit_code\":%s}}' \"$CERBERUS_STAGE\" \"$result\" | curl -fsS --max-time 10 -X POST -H \"$CERBERUS_AUTH_HEADER\" -H 'Content-Type: application/json' --data-binary @- {shlex.quote(failure_url)} >/dev/null 2>&1 || :\n"
             "    fi\n"
             "}\n"
             "trap cerberus_report_failure EXIT\n"
             "cerberus_report_stage() {\n"
             "    CERBERUS_STAGE=$1\n"
-            f"    printf '{{\"stage\":\"%s\"}}' \"$CERBERUS_STAGE\" | curl -fsS --max-time 10 -X POST -H {shlex.quote(f'Authorization: Bearer {ready_token}')} -H 'Content-Type: application/json' --data-binary @- {shlex.quote(progress_url)} >/dev/null 2>&1 || :\n"
+            f"    printf '{{\"stage\":\"%s\"}}' \"$CERBERUS_STAGE\" | curl -fsS --max-time 10 -X POST -H \"$CERBERUS_AUTH_HEADER\" -H 'Content-Type: application/json' --data-binary @- {shlex.quote(progress_url)} >/dev/null 2>&1 || :\n"
             "}\n"
             "cerberus_report_stage docker_install\n"
         )
-    script += (
-        "apt-get install -y docker.io curl ca-certificates gnupg\n"
-        "systemctl enable --now docker\n"
-    )
+    script += ("apt-get install -y docker.io\n" if private_callback or vpc_callback else "apt-get install -y docker.io curl ca-certificates gnupg\n")
+    script += "systemctl enable --now docker\n"
     if private_callback or vpc_callback:
         script += "cerberus_report_stage gvisor_install\n"
     script += (
@@ -189,9 +194,10 @@ def docker_user_data(callback_url, ready_token, opensandbox_spike=False, netbird
 
         script += opensandbox_spike_user_data(netbird=netbird_setup_key is not None, report_stages=private_callback or vpc_callback, vpc_subnet=vpc_subnet if vpc_callback else None)
     callback_stage = "cerberus_report_stage ready_callback\n" if private_callback or vpc_callback else ""
+    auth_header = '"$CERBERUS_AUTH_HEADER"' if private_callback or vpc_callback else shlex.quote(f"Authorization: Bearer {ready_token}")
     return script + callback_stage + (
-        f"curl --fail --silent --show-error --retry 12 --retry-delay 5 --max-time 15 -X POST "
-        f"-H {shlex.quote(f'Authorization: Bearer {ready_token}')} -H 'Content-Type: application/json' "
+        f"curl -fsS --retry 12 --retry-delay 5 --max-time 15 -X POST "
+        f"-H {auth_header} -H 'Content-Type: application/json' "
         f"--data-binary \"$proof\" {shlex.quote(callback_url)}\n"
     )
 

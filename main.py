@@ -17,7 +17,7 @@ app = FastAPI(title="Cerberus")
 ready_signals = ReadySignals()
 job_registry = JobRegistry()
 BOOTSTRAP_STAGES = frozenset({
-    "docker_install", "gvisor_install", "runtime_smoke", "opensandbox_dependencies",
+    "bootstrap_started", "docker_install", "gvisor_install", "runtime_smoke", "opensandbox_dependencies",
     "network_create", "opensandbox_config", "opensandbox_server", "isolation_probe",
     "bridge_inspect", "firewall_ipv4", "firewall_ipv6", "sandbox_create",
     "docker_isolation", "smoke_command", "external_probe", "dns_probe", "host_probe",

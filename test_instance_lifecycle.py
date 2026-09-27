@@ -3,11 +3,12 @@ import asyncio
 import base64
 import json
 import subprocess
+import urllib.request
 
 import httpx
 import pytest
 
-from instance_lifecycle import ReadySignals, VultrInstances, docker_user_data, temporary_instance, verify_instance
+from instance_lifecycle import ReadySignals, VultrInstances, block_public_ssh_user_data, docker_user_data, temporary_instance, verify_instance
 from main import BOOTSTRAP_STAGES, app, callback_app, control_server_app, ready_signals, vpc_callback_app
 
 
@@ -187,10 +188,43 @@ def test_vpc_callback_is_private_without_netbird_key_or_public_api():
     assert "http://10.52.0.2:8001/internal/failed" in script
     assert "netbird up" not in script
     assert "--subnet=172.29.240.0/24" in script
+    assert "bootstrap_started" in BOOTSTRAP_STAGES
+    assert script.index("bootstrap_started") < script.index("apt-get update")
     assert "CERBERUS_STAGE=docker_install" in script
     assert subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True).returncode == 0
     with pytest.raises(ValueError, match="VPC"):
         docker_user_data(url, "R" * 36, True, netbird_setup_key="A" * 36, vpc_callback=True, vpc_subnet="10.52.0.0/24")
+
+
+def test_early_vpc_stage_reports_json_with_token_before_packages(monkeypatch):
+    captured = {}
+
+    def urlopen(request, timeout):
+        captured.update({
+            "url": request.full_url, "method": request.get_method(),
+            "data": json.loads(request.data),
+            "headers": {key.lower(): value for key, value in request.header_items()},
+            "timeout": timeout,
+        })
+        return httpx.Response(204)
+
+    monkeypatch.setattr(subprocess, "check_output", lambda *args, **kwargs: "")
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    script = block_public_ssh_user_data("http://10.52.0.3:8001/internal/stage", "R" * 43)
+    code = script.split("python3 - <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    exec(compile(code, "<early-vpc-stage>", "exec"), {})
+    assert captured == {
+        "url": "http://10.52.0.3:8001/internal/stage", "method": "POST",
+        "data": {"stage": "bootstrap_started"},
+        "headers": {"authorization": "Bearer " + "R" * 43, "content-type": "application/json"},
+        "timeout": 5,
+    }
+
+    def unavailable(*args, **kwargs):
+        raise TimeoutError
+
+    monkeypatch.setattr(urllib.request, "urlopen", unavailable)
+    exec(compile(code, "<early-vpc-stage>", "exec"), {})
 
 
 @pytest.mark.parametrize("url,subnet", [
@@ -566,7 +600,7 @@ def test_vpc_callback_shares_readiness_state_only_with_approved_vpc_clients(monk
         try:
             transport = httpx.ASGITransport(app=control_server_app, client=("10.52.0.3", 12345))
             async with httpx.AsyncClient(transport=transport, base_url="http://10.52.0.2:8001") as client:
-                ok = await client.post("/internal/stage", headers={"Authorization": f"Bearer {token}"}, json={"stage": "docker_install"})
+                ok = await client.post("/internal/stage", headers={"Authorization": f"Bearer {token}"}, json={"stage": "bootstrap_started"})
                 listener = await client.head("/internal/stage")
                 jobs = await client.post("/jobs", json={"type": "connectivity"})
             blocked_transport = httpx.ASGITransport(app=control_server_app, client=("192.0.2.10", 12345))
@@ -576,7 +610,7 @@ def test_vpc_callback_shares_readiness_state_only_with_approved_vpc_clients(monk
         finally:
             ready_signals.unregister(token)
 
-    assert asyncio.run(request()) == (204, 405, 404, 404, "docker_install")
+    assert asyncio.run(request()) == (204, 405, 404, 404, "bootstrap_started")
 
 
 def test_ready_timeout():

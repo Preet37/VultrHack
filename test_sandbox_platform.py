@@ -407,9 +407,10 @@ def test_generated_smoke_proof_requires_denials_and_host_counter(test_net_exit, 
     assert events[-1] == "destroyed"
 
 
-def test_private_sandbox_bootstrap_stays_within_conservative_user_data_budget():
+@pytest.mark.parametrize("address,subnet", [("10.52.0.2", "10.52.0.0/24"), ("192.168.255.254", "192.168.255.0/24")])
+def test_private_sandbox_bootstrap_stays_within_conservative_user_data_budget(address, subnet):
     script = docker_user_data("http://100.124.55.15:8000/internal/ready", "R" * 36, True, "A" * 36, True)
-    vpc_script = docker_user_data("http://10.52.0.2:8001/internal/ready", "R" * 36, True, vpc_callback=True, vpc_subnet="10.52.0.0/24")
+    vpc_script = docker_user_data(f"http://{address}:8001/internal/ready", "R" * 43, True, vpc_callback=True, vpc_subnet=subnet)
     assert len(base64.b64encode(script.encode())) < 16 * 1024
     assert len(base64.b64encode(vpc_script.encode())) < 16 * 1024
 
