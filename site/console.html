@@ -109,8 +109,16 @@
   .tab.on{color:#fff;background:var(--emerald);border-color:var(--emerald)}
 
   .vmbody{flex:1;display:grid;grid-template-columns:1fr 300px;min-height:0}
-  .stack{padding:26px;min-height:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
-    background:var(--paper);background-image:radial-gradient(600px 300px at 30% 0,#d9dcd7 0,transparent 60%)}
+  .stack{padding:26px;min-height:0;display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative;overflow:hidden;
+    background:#0b1219;
+    background-image:
+      repeating-linear-gradient(60deg,rgba(120,210,170,.045) 0 1px,transparent 1px 26px),
+      repeating-linear-gradient(-60deg,rgba(120,210,170,.045) 0 1px,transparent 1px 26px),
+      radial-gradient(900px 520px at 72% 120%,#123a30 0,transparent 60%),
+      radial-gradient(760px 440px at 12% -12%,#0e2b3c 0,transparent 55%)}
+  .stack::before{content:"";position:absolute;inset:0;pointer-events:none;z-index:0;
+    background:url('/cerberus.jpg') center 42%/300px auto no-repeat;opacity:.1;mix-blend-mode:screen}
+  .stack>*{position:relative;z-index:1}
   .nested{width:100%;max-width:780px;height:100%;min-height:0;display:flex;flex-direction:column;border:1px solid var(--line);border-radius:14px;
     background:var(--card);position:relative;overflow:hidden;box-shadow:0 26px 60px -30px rgba(20,30,25,.5);transition:box-shadow .3s,transform .3s}
   .nested.breach{border-color:var(--coral);box-shadow:0 0 0 1px var(--coral),0 0 60px -18px rgba(225,75,84,.6);animation:shake .5s}
@@ -214,6 +222,46 @@
   .cbtn.primary{background:var(--ink);border:1px solid var(--ink);color:var(--card)}
   .cbtn.primary:hover{filter:brightness(1.15)}
 
+  /* agent comms feed */
+  .agents{flex:none}
+  .rlab.cdiv{border-top:1px solid var(--line);margin-top:2px}
+  .cfeed{flex:1;min-height:64px;overflow:auto;padding:0 13px 8px;display:flex;flex-direction:column;gap:6px}
+  .cfeed::-webkit-scrollbar{width:6px}.cfeed::-webkit-scrollbar-thumb{background:var(--line2);border-radius:6px}
+  .cempty{font-family:var(--mono);font-size:10.5px;color:var(--faint);padding:5px 2px}
+  .cmsg{display:flex;align-items:flex-start;gap:7px;font-family:var(--mono);font-size:10.5px;line-height:1.45;opacity:0;animation:fi .25s forwards}
+  .cmsg .pair{flex:none;display:flex;align-items:center;gap:3px;padding-top:1px}
+  .cmsg .b{min-width:20px;height:16px;padding:0 3px;border-radius:5px;display:grid;place-items:center;font-size:8px;font-weight:700;color:#fff}
+  .cmsg .arw{color:var(--faint);font-size:8px}
+  .cmsg .ct{color:var(--ink2)}
+  .ag.talk{animation:talk 1s}
+  @keyframes talk{0%,100%{box-shadow:var(--sh3)}40%{box-shadow:0 0 0 2px color-mix(in srgb,var(--ac) 60%,transparent),0 0 20px -4px var(--ac)}}
+
+  /* results / benchmark dashboard */
+  .tab[disabled]{opacity:.45;cursor:not-allowed}
+  .results{position:absolute;inset:0;z-index:40;background:var(--surface);display:none;flex-direction:column}
+  .results.show{display:flex;animation:fade .3s}
+  .rhead{flex:none;display:flex;align-items:center;padding:16px 24px;border-bottom:1px solid var(--line);background:var(--card)}
+  .rt2{font-family:var(--disp);font-weight:800;font-size:18px}
+  .rsub{font-family:var(--mono);font-size:11px;color:var(--faint);margin-top:2px}
+  .rclose{margin-left:auto;font-family:var(--mono);font-size:12px;color:var(--ink2);background:var(--card);border:1px solid var(--line2);border-radius:9px;padding:8px 14px;cursor:pointer}
+  .rscroll{flex:1;overflow:auto;padding:22px 24px}
+  .tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(178px,1fr));gap:13px;margin-bottom:24px}
+  .tile{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:15px 16px;box-shadow:var(--sh2)}
+  .tile .tn{font-family:var(--disp);font-weight:900;font-size:27px;line-height:1}
+  .tile .tn.g{color:var(--emerald)}.tile .tn.r{color:var(--coral)}
+  .tile .tl{font-family:var(--mono);font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--faint);margin-top:8px}
+  .tile .td{font-size:11px;color:var(--ink2);margin-top:2px}
+  .rsec{font-family:var(--disp);font-weight:800;font-size:14px;margin:4px 0 12px}
+  .rtable{background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:var(--sh2)}
+  .rtr{display:grid;grid-template-columns:1.1fr 1fr .9fr 1.25fr .7fr;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line);align-items:center;font-size:12.5px}
+  .rtr:last-child{border-bottom:none}
+  .rtr.rhd{font-family:var(--mono);font-size:9.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--faint);background:var(--surface)}
+  .rtr .vc{font-family:var(--disp);font-weight:700}
+  .rtr .ep,.rtr .fx{font-family:var(--mono);font-size:11px;color:var(--ink2)}
+  .rtr .loc{font-family:var(--mono);font-size:11.5px}.rtr .loc .p{color:var(--emerald)}.rtr .loc .m{color:var(--coral)}
+  .rtr .stt{font-family:var(--mono);font-size:10px;color:var(--emerald);background:var(--emerald-soft);border:1px solid var(--emerald-br);border-radius:999px;padding:3px 9px;justify-self:start}
+  .rfoot{margin-top:18px;font-size:12px;color:var(--ink2);line-height:1.55}.rfoot b{color:var(--ink)}
+
   @media(max-width:860px){.vmbody{grid-template-columns:1fr}.rail{display:none}.sticky{display:none}.cards{grid-template-columns:1fr}}
 </style>
 </head>
@@ -271,6 +319,7 @@
           <div class="rt">
             <span class="kv">uptime <b id="uptime">0.0s</b></span>
             <button class="tab" id="tabFind">findings <span id="fcount">0</span></button>
+            <button class="tab" id="tabResults" disabled>Results</button>
           </div>
         </div>
         <div class="vmbody">
@@ -293,6 +342,8 @@
               <div class="ag" data-a="review"  style="--ac:#7c6cf0"><span class="av">RV</span><div class="mid"><div class="nm">Review</div><div class="st">idle</div></div><span class="sp"></span><span class="ck">✓</span></div>
               <div class="ag" data-a="contain" style="--ac:#12854a"><span class="av">SB</span><div class="mid"><div class="nm">Containment</div><div class="st">idle</div></div><span class="sp"></span><span class="ck">✓</span></div>
             </div>
+            <div class="rlab cdiv">agent comms · handoffs</div>
+            <div class="cfeed" id="cfeed"><div class="cempty">the team talks here as it works…</div></div>
             <div class="vitals">
               <div class="vrow"><span>confirmed</span><b id="v_conf">0</b></div>
               <div class="vrow"><span>certified closed</span><b class="g" id="v_cert">0 / 0</b></div>
@@ -306,6 +357,20 @@
         <div class="drawer" id="drawer">
           <div class="dh"><span class="t">Suggested patches</span><span class="sum" id="dsum">review each diff — <b>we never auto-apply to your repo</b></span><button class="applyall" id="applyAll">Apply all</button><span class="x" id="dclose">✕</span></div>
           <div class="dwrap" id="dwrap"></div>
+        </div>
+
+        <!-- Results / benchmark dashboard -->
+        <div class="results" id="results">
+          <div class="rhead">
+            <div><div class="rt2">Run results</div><div class="rsub" id="rsub">receipt —</div></div>
+            <button class="rclose" id="rclose">✕ close</button>
+          </div>
+          <div class="rscroll">
+            <div class="tiles" id="tiles"></div>
+            <div class="rsec">Findings — where the bugs were &amp; what the system rewrote</div>
+            <div class="rtable"><div class="rtr rhd"><span>vulnerability</span><span>endpoint</span><span>lines rewritten</span><span>fix</span><span>status</span></div><div id="rtbody"></div></div>
+            <div class="rfoot">This run is written to a signed <b>receipt</b> — findings, diffs, logs and canary proofs — stored per project. That's the substrate for benchmarking Cerberus across repos over time.</div>
+          </div>
         </div>
       </div>
 
@@ -353,6 +418,10 @@
   function hideCrash(){$("#crash").classList.remove("show");}
   $("#crashDismiss").addEventListener("click",hideCrash);
   $("#crashView").addEventListener("click",function(){hideCrash();openDrawer();});
+
+  /* ---- results dashboard ---- */
+  $("#tabResults").addEventListener("click",function(){if(this.disabled)return;$("#results").classList.add("show");});
+  $("#rclose").addEventListener("click",function(){$("#results").classList.remove("show");});
 
   /* ---- act stepper ---- */
   function setAct(n){
@@ -405,6 +474,45 @@
       return '<div class="r '+c+'"><span class="g">'+g+'</span><span class="t">'+esc(l)+'</span></div>';}).join("");
   }
 
+  /* ---- agent comms ---- */
+  var AG={recon:{c:"RC",col:"#4f7fe0"},triage:{c:"TR",col:"#12a58a"},exploit:{c:"EX",col:"#e14b54"},
+    patch:{c:"PA",col:"#b7791f"},review:{c:"RV",col:"#7c6cf0"},contain:{c:"SB",col:"#12854a"},
+    team:{c:"ALL",col:"#5a635d"},user:{c:"YOU",col:"#1b221e"}};
+  function addComms(frm,to,text){
+    var feed=$("#cfeed");var e=$(".cempty",feed);if(e)e.remove();
+    var a=AG[frm]||AG.team,b=AG[to]||AG.team;
+    var d=document.createElement("div");d.className="cmsg";
+    d.innerHTML='<span class="pair"><span class="b" style="background:'+a.col+'">'+a.c+'</span><span class="arw">▶</span><span class="b" style="background:'+b.col+'">'+b.c+'</span></span><span class="ct">'+esc(text)+'</span>';
+    feed.appendChild(d);feed.scrollTop=feed.scrollHeight;
+    [frm,to].forEach(function(k){var g=document.querySelector('.ag[data-a="'+k+'"]');if(g){g.classList.remove("talk");void g.offsetWidth;g.classList.add("talk");}});
+  }
+
+  /* ---- results / benchmark ---- */
+  var findData={},meta={};
+  function countLoc(diff){var a=0,r=0;(diff||"").split("\n").forEach(function(l){
+    if(l.indexOf("+++")===0||l.indexOf("---")===0)return;if(l[0]==="+")a++;else if(l[0]==="-")r++;});return{a:a,r:r};}
+  function fd(cls){return findData[cls]||(findData[cls]={cls:cls,added:0,removed:0,certified:false});}
+  function tile(n,l,d,cls){return '<div class="tile"><div class="tn '+(cls||"")+'">'+esc(String(n))+'</div><div class="tl">'+esc(l)+'</div><div class="td">'+esc(d)+'</div></div>';}
+  function renderResults(){
+    var arr=Object.keys(findData).map(function(k){return findData[k];});
+    var tA=arr.reduce(function(s,d){return s+(d.added||0);},0),tR=arr.reduce(function(s,d){return s+(d.removed||0);},0);
+    $("#rsub").textContent="receipt · "+(meta.instance||"—")+" · "+(meta.time||"—")+"s · reasoning "+(meta.model||"—");
+    $("#tiles").innerHTML=[
+      tile(meta.confirmed||0,"exploits proven","canary-confirmed","r"),
+      tile((meta.certified||0)+" / "+(meta.confirmed||0),"certified closed","re-exploit blocked","g"),
+      tile(arr.length,"vuln classes","distinct sinks",""),
+      tile("+"+tA+" / -"+tR,"lines rewritten","by the system",""),
+      tile("none","data exfiltrated","egress default-deny","g"),
+      tile((meta.time||"—")+"s","scan time","find → prove → fix → re-prove","")
+    ].join("");
+    $("#rtbody").innerHTML=arr.map(function(d){
+      return '<div class="rtr"><span class="vc">'+esc(d.cls)+'</span><span class="ep">'+esc(d.endpoint||"—")+'</span>'+
+        '<span class="loc"><span class="p">+'+(d.added||0)+'</span> / <span class="m">-'+(d.removed||0)+'</span></span>'+
+        '<span class="fx">'+esc(d.patch||"—")+'</span>'+
+        '<span class="stt">'+(d.certified?"certified":"open")+'</span></div>';
+    }).join("");
+  }
+
   /* ---- uptime ---- */
   var t0=0,upTimer=null,dead=false;
   function startUptime(){t0=Date.now();dead=false;upTimer=setInterval(function(){
@@ -418,6 +526,8 @@
     $("#launch").classList.add("hide");
     setTimeout(function(){$("#vm").classList.add("show");},260);
     logEl=$("#log");logEl.innerHTML="";finds={};$("#dwrap").innerHTML="";$("#fcount").textContent="0";
+    findData={};meta={};$("#cfeed").innerHTML='<div class="cempty">the team talks here as it works…</div>';
+    $("#tabResults").disabled=true;$("#results").classList.remove("show");
     closeDrawer();hideCrash();resetApplyAll();
     $("#nested").classList.remove("breach","dead");$("#ctag").textContent="inside the instance";$("#ctag").parentNode.querySelector("b").style.color="";
     ["recon","triage","exploit","patch","review","contain"].forEach(function(a){agState(a,"","idle");});
@@ -436,6 +546,7 @@
     if(ev.type==="log"){term(ev.level,ev.ts,ev.text);return;}
     if(ev.type==="act"){setAct(ev.n);return;}
     if(ev.type==="toast"){toast(ev.icon,ev.title,ev.text);return;}
+    if(ev.type==="comms"){addComms(ev.frm,ev.to,ev.text);return;}
 
     if(ev.type==="stage"){
       if(ev.stage==="boot"){$("#iid").textContent=ev.instance||"—";$("#tpath").textContent="root@"+(ev.instance||"instance")+":~/target#";
@@ -448,11 +559,12 @@
       }
     }
     else if(ev.type==="triage"){
+      meta.model=(ev.source||"").replace("vultr-inference:","");
       agState("recon","done",(ev.classes||[]).length+" classes reachable");
       agState("triage","done",ev.found+" candidates ≥ conf 7");
       agState("exploit","on","firing exploits");
     }
-    else if(ev.type==="exploit"){conf=ev.confirmed;$("#v_conf").textContent=conf;
+    else if(ev.type==="exploit"){conf=ev.confirmed;$("#v_conf").textContent=conf;fd(ev.cls).endpoint=ev.endpoint;
       agState("exploit","on",conf+" breach"+(conf>1?"es":"")+" proven");}
     else if(ev.type==="kill"){
       $("#nested").classList.add("breach");agState("contain","on","killing container");
@@ -463,10 +575,11 @@
     else if(ev.type==="patch"){
       var el=findCard(ev.cls);$(".ep",el).textContent=(ev.patch_source||"")+(ev.functional_ok?" · app still works":"");
       $(".diff",el).innerHTML='<div class="ba"><span class="b">before</span><span class="a">after</span></div><pre>'+diffHTML(ev.diff)+'</pre>';
+      var pd=fd(ev.cls);var lc=countLoc(ev.diff);pd.added=lc.a;pd.removed=lc.r;pd.patch=ev.patch_source;
       agState("patch","on",Object.keys(finds).length+" patched");
     }
     else if(ev.type==="verify"){
-      var e2=findCard(ev.cls);var vb=$(".vb",e2);
+      var e2=findCard(ev.cls);var vb=$(".vb",e2);fd(ev.cls).certified=ev.certified;
       if(ev.certified){vb.textContent="certified";vb.classList.add("ok");cert=ev.certified_count;$("#v_cert").textContent=cert+" / "+conf;}
       else{vb.textContent=ev.reexploit_blocked?"blocked":"still open";}
       agState("review","on",cert+" certified");agState("patch","done",Object.keys(finds).length+" patched");
@@ -483,7 +596,9 @@
       agState("contain","done","instance destroyed");
       $("#v_conf").textContent=ev.confirmed;$("#v_cert").textContent=ev.certified+" / "+ev.confirmed;
       $("#dsum").innerHTML="<b>"+ev.confirmed+"</b> found · <b>"+ev.certified+"/"+ev.confirmed+"</b> certified · nothing escaped — review each diff, we never auto-apply";
-      document.querySelectorAll(".step").forEach(function(s){s.classList.remove("on");s.classList.add("done");});
+      meta.instance=$("#iid").textContent;meta.confirmed=ev.confirmed;meta.certified=ev.certified;
+      meta.model=meta.model||(ev.triage_source||"").replace("vultr-inference:","");meta.time=((Date.now()-t0)/1000).toFixed(1);
+      renderResults();$("#tabResults").disabled=false;
       if(Object.keys(finds).length)setTimeout(openDrawer,700);
     }
     else if(ev.type==="error"){term("err","",ev.message);}

@@ -130,6 +130,10 @@ async def _run_real_scan(source_dir: str, emit):
     async def log(level: str, text: str):
         await emit(type="log", level=level, ts=_clk(), text=text)
 
+    async def comms(frm: str, to: str, text: str):
+        # An agent-to-agent handoff: the team reasoning out loud, not six silos.
+        await emit(type="comms", frm=frm, to=to, text=text)
+
     # ======================= ACT 1 — DETONATE =============================
     await emit(type="act", n=1, name="Detonate")
     await emit(type="stage", stage="boot", instance=instance,
@@ -162,6 +166,8 @@ async def _run_real_scan(source_dir: str, emit):
         await log("ok", f"triage: {len(report.findings)} candidates ≥ confidence 7 — arming canaries")
 
         findings = list(report.findings)
+        await comms("recon", "triage", f"mapped {len(classes)} vuln classes — rank them")
+        await comms("triage", "exploit", f"{len(findings)} ranked ≥ conf 7 — go prove them")
 
         # ======================= ACT 2 — BREACH ===========================
         await emit(type="act", n=2, name="Breach")
@@ -173,12 +179,14 @@ async def _run_real_scan(source_dir: str, emit):
                        canary=f.canary_value, chain=f.input_to_sink,
                        proof=(f.confirming_output or "")[:360], confirmed=confirmed)
             await log("breach", f"canary {(f.canary_value or '')[:14]} LEFT THE BOX — {f.vuln_class} confirmed at {f.endpoint}")
+            await comms("exploit", "contain", f"{f.vuln_class} confirmed at {f.endpoint} — canary left the box, hostile")
             if confirmed == 1:
                 await emit(type="toast", icon="alert", title="Breach proven",
                            text=f"planted secret left the box via {f.vuln_class}")
 
         # the kill: proven breach => destroy the ORIGINAL box, now, before fixing
         await log("warn", f"containment: {confirmed} breaches proven inside {instance}")
+        await comms("contain", "team", f"{confirmed} breaches — this target is hostile, pulling the instance now")
         await log("breach", "policy: proven breach ⇒ this box is quarantined and destroyed · blast radius zero")
         await emit(type="kill", instance=instance, confirmed=confirmed)
         for level, txt, pause in [
@@ -193,6 +201,7 @@ async def _run_real_scan(source_dir: str, emit):
         await log("ok", f"instance destroyed · GET /{instance} → 404 · receipt sealed")
         await emit(type="stage", stage="destroy", instance=instance, detail="instance destroyed")
         await emit(type="toast", icon="shield", title="Instance destroyed", text="nothing escaped the sandbox")
+        await comms("contain", "patch", "box is down — remediate from the receipt, on fresh copies")
 
         # ======================= ACT 3 — REMEDIATE ========================
         # The fixer agent is treated as untrusted: it patches a disposable copy,
@@ -212,6 +221,7 @@ async def _run_real_scan(source_dir: str, emit):
                        functional_ok=res.functional_ok, validated=res.validated,
                        certified=res.certified, review=res.independent_review,
                        notes=res.validation_notes[:200])
+            await comms("patch", "review", f"{f.vuln_class} patched on a copy — verify me")
 
         # ======================= ACT 4 — RE-VERIFY ========================
         await emit(type="act", n=4, name="Re-verify")
@@ -225,9 +235,12 @@ async def _run_real_scan(source_dir: str, emit):
                       + (" · certified closed" if res.certified else ""))
             await emit(type="verify", cls=f.vuln_class, reexploit_blocked=res.reexploit_blocked,
                        functional_ok=res.functional_ok, certified=res.certified, certified_count=certified)
+            if res.certified:
+                await comms("review", "patch", f"{f.vuln_class} re-exploit blocked — certified closed")
             explanation = await asyncio.to_thread(_explain, f.vuln_class, client)
             await emit(type="explain", cls=f.vuln_class, text=explanation)
 
+        await comms("contain", "user", f"receipt sealed · {certified}/{confirmed} closed · nothing escaped")
         await log("ok", f"done · {confirmed} found · {certified}/{confirmed} certified closed · nothing escaped")
         await emit(type="toast", icon="check", title=f"{certified}/{confirmed} certified",
                    text="patches ready to review & apply")
