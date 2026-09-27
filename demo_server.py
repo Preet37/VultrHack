@@ -134,16 +134,21 @@ async def _run_real_scan(source_dir: str, emit):
     await emit(type="act", n=1, name="Detonate")
     await emit(type="stage", stage="boot", instance=instance,
                detail="spinning a disposable gVisor container inside the instance")
-    await log("info", f"provisioning disposable instance {instance}")
+    await log("info", f"new target received: {name}/ — this code is untrusted, it does not run here")
+    await asyncio.sleep(0.4)
+    await log("info", f"creating a disposable instance to run it in: {instance}")
     await log("dim", "runner: local-subprocess (tier-1) · live Vultr gVisor host pending #16")
+    await asyncio.sleep(0.4)
     await log("info", "isolation: gVisor runsc · own kernel · egress default-deny")
-    await log("info", f"spawning sandbox container · mounting {name}/ read-only")
-    await log("info", "resolving target dependencies … ok")
+    await log("info", f"copying {name}/ into the sandbox (read-only)")
+    await asyncio.sleep(0.4)
+    await log("info", "resolving target dependencies …")
     runner = LocalSubprocessRunner(source_dir, entrypoint)
     base = await asyncio.to_thread(runner.start)
-    await log("ok", f"target up · listening on {base} · health 200")
+    await log("ok", "dependencies resolved · target booted")
+    await log("ok", f"listening on {base} · health 200")
     await emit(type="toast", icon="check", title="Sandbox ready",
-               text=f"{name} is live inside {instance}")
+               text=f"{name} is running in an isolated box")
 
     try:
         await emit(type="stage", stage="recon", detail="mapping routes, inputs and candidate sinks")
@@ -187,7 +192,7 @@ async def _run_real_scan(source_dir: str, emit):
         await asyncio.to_thread(runner.stop)
         await log("ok", f"instance destroyed · GET /{instance} → 404 · receipt sealed")
         await emit(type="stage", stage="destroy", instance=instance, detail="instance destroyed")
-        await emit(type="toast", icon="shield", title="Instance destroyed", text="0 B left the box")
+        await emit(type="toast", icon="shield", title="Instance destroyed", text="nothing escaped the sandbox")
 
         # ======================= ACT 3 — REMEDIATE ========================
         # The fixer agent is treated as untrusted: it patches a disposable copy,

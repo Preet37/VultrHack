@@ -10,8 +10,8 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800;900&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&family=Caveat:wght@600&display=swap">
 <style>
   :root{
-    --paper:#cdd0cc;--surface:#e6e8e4;--card:#f6f7f5;--sink:#d7dad5;
-    --ink:#1b221e;--ink2:#5a635d;--faint:#8b938c;--line:#c5cac3;--line2:#b4bab2;
+    --paper:#c8cdc7;--surface:#dfe3dd;--card:#eef1ec;--sink:#d3d7d1;
+    --ink:#1b221e;--ink2:#5a635d;--faint:#8b938c;--line:#c1c7bf;--line2:#b0b7ae;
     --emerald:#12854a;--emerald2:#0e6e3d;--lime:#2fb866;--emerald-soft:#e4f1e8;--emerald-br:#bfe3ca;
     --coral:#e14b54;--coral2:#c93e46;--coral-soft:#fbe7e7;--amber:#b7791f;--blue:#4f7fe0;--violet:#7c6cf0;--teal:#12a58a;
     --graphite:#161a20;--g-ink:#c9d2c9;--g-dim:#6b7568;
@@ -37,8 +37,9 @@
 
   /* ===== toasts (macOS style) ===== */
   .toasts{position:absolute;top:14px;right:14px;z-index:60;display:flex;flex-direction:column;gap:10px;width:320px}
-  .toast{display:flex;gap:11px;align-items:flex-start;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 14px;box-shadow:var(--sh);
-    transform:translateX(120%);opacity:0;transition:transform .35s cubic-bezier(.2,.8,.2,1),opacity .35s}
+  .toast{display:flex;gap:12px;align-items:flex-start;background:rgba(249,250,248,.68);-webkit-backdrop-filter:blur(20px) saturate(1.5);backdrop-filter:blur(20px) saturate(1.5);
+    border:1px solid rgba(255,255,255,.55);border-radius:16px;padding:13px 15px;box-shadow:0 20px 46px -18px rgba(20,30,25,.5),inset 0 1px 0 rgba(255,255,255,.7);
+    transform:translateX(120%);opacity:0;transition:transform .5s cubic-bezier(.2,.85,.25,1),opacity .5s}
   .toast.in{transform:none;opacity:1}
   .toast .ti{width:30px;height:30px;border-radius:9px;flex:none;display:grid;place-items:center;color:#fff;font-size:15px}
   .toast.check .ti{background:linear-gradient(180deg,var(--lime),var(--emerald))}
@@ -167,8 +168,8 @@
   .dh .t{font-family:var(--disp);font-weight:800;font-size:14px}
   .dh .sum{font-family:var(--mono);font-size:11px;color:var(--ink2)}.dh .sum b{color:var(--emerald)}
   .dh .x{margin-left:auto;cursor:pointer;color:var(--faint);font-size:18px;line-height:1}
-  .dwrap{overflow:auto;height:calc(100% - 48px);padding:16px 20px;display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:16px;align-content:start}
-  .find{background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:var(--sh2)}
+  .dwrap{overflow:auto;height:calc(100% - 48px);padding:16px 20px;display:grid;grid-template-columns:repeat(auto-fill,minmax(560px,1fr));gap:16px;align-content:start;grid-auto-rows:max-content}
+  .find{align-self:start;background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:var(--sh2)}
   .find .fh{display:flex;align-items:center;gap:8px;padding:11px 14px;border-bottom:1px solid var(--line)}
   .find .fh .cl{font-family:var(--disp);font-weight:700;font-size:13px}
   .find .fh .ep{font-family:var(--mono);font-size:10.5px;color:var(--faint)}
@@ -180,7 +181,7 @@
   .sbtn{font-family:var(--mono);font-size:10px;border-radius:7px;padding:4px 10px;cursor:pointer;border:1px solid var(--line2);background:var(--card);color:var(--ink2)}
   .sbtn.apply{background:linear-gradient(180deg,var(--lime),var(--emerald));color:#fff;border-color:var(--emerald)}
   .sbtn.done{background:var(--emerald-soft);color:var(--emerald);border-color:var(--emerald-br);cursor:default}
-  .diff pre{margin:0;font-family:var(--mono);font-size:10.5px;line-height:1.6;max-height:180px;overflow:auto;background:#f8faf6}
+  .diff pre{margin:0;font-family:var(--mono);font-size:11.5px;line-height:1.65;max-height:340px;overflow:auto;background:#f8faf6;padding:4px 0}
   .diff .ba{display:flex;gap:5px;padding:6px 14px;border-bottom:1px solid var(--line)}
   .diff .ba span{font-family:var(--mono);font-size:9px;padding:2px 7px;border-radius:5px}
   .diff .ba .b{color:var(--coral2);background:var(--coral-soft)}.diff .ba .a{color:var(--emerald);background:var(--emerald-soft)}
@@ -191,7 +192,29 @@
   .why .h img{width:14px;height:14px;border-radius:3px}
   .why .tx{font-size:12.5px;color:#26463a;line-height:1.5}
 
-  @media(max-width:860px){.vmbody{grid-template-columns:1fr}.rail{display:none}.sticky{display:none}.cards{grid-template-columns:1fr}.step .sub{display:none}}
+  .applyall{font-family:var(--disp);font-weight:700;font-size:12px;color:#fff;background:linear-gradient(180deg,var(--lime),var(--emerald));border:1px solid var(--emerald);border-radius:9px;padding:7px 15px;cursor:pointer;box-shadow:0 6px 16px -8px rgba(18,133,74,.6)}
+  .applyall:hover{filter:brightness(1.06)}.applyall.done{background:var(--emerald-soft);color:var(--emerald);border-color:var(--emerald-br);cursor:default;box-shadow:none}
+
+  /* containment crash dialog */
+  .crashwrap{position:absolute;inset:0;z-index:70;display:none;align-items:center;justify-content:center;background:rgba(20,28,24,.42);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
+  .crashwrap.show{display:flex;animation:fade .25s}
+  @keyframes fade{from{opacity:0}to{opacity:1}}
+  .crashcard{width:420px;max-width:90%;background:var(--card);border:1px solid var(--line);border-radius:18px;padding:22px;box-shadow:0 40px 90px -30px rgba(20,30,25,.7);animation:pop .3s cubic-bezier(.2,.9,.3,1.2)}
+  @keyframes pop{from{transform:scale(.92);opacity:0}to{transform:none;opacity:1}}
+  .crashtop{display:flex;gap:13px;align-items:center;margin-bottom:13px}
+  .crashtop .ci{width:40px;height:40px;border-radius:12px;flex:none;display:grid;place-items:center;font-family:var(--disp);font-weight:900;font-size:22px;color:#fff;background:linear-gradient(180deg,#f2757e,var(--coral));box-shadow:0 8px 20px -8px rgba(225,75,84,.6)}
+  .crashtop .ct{font-family:var(--disp);font-weight:800;font-size:16px}
+  .crashtop .cst{font-family:var(--mono);font-size:11px;color:var(--faint)}
+  .cb{font-size:13.5px;line-height:1.55;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:11px;padding:12px 13px}
+  .cb b{color:var(--coral)}
+  .cnote{font-size:12px;line-height:1.5;color:var(--ink2);margin:11px 2px 16px}
+  .cbtns{display:flex;gap:9px;justify-content:flex-end}
+  .cbtn{font-family:var(--disp);font-weight:700;font-size:13px;border-radius:10px;padding:9px 16px;cursor:pointer}
+  .cbtn.ghost{background:var(--card);border:1px solid var(--line2);color:var(--ink2)}
+  .cbtn.primary{background:var(--ink);border:1px solid var(--ink);color:var(--card)}
+  .cbtn.primary:hover{filter:brightness(1.15)}
+
+  @media(max-width:860px){.vmbody{grid-template-columns:1fr}.rail{display:none}.sticky{display:none}.cards{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -204,6 +227,16 @@
     </div>
     <div class="body">
       <div class="toasts" id="toasts"></div>
+
+      <!-- containment crash dialog (fires when the box is killed) -->
+      <div class="crashwrap" id="crash">
+        <div class="crashcard">
+          <div class="crashtop"><span class="ci">!</span><div><div class="ct">Sandbox terminated by Containment</div><div class="cst" id="crashinst">instance —</div></div></div>
+          <div class="cb" id="crashbody"></div>
+          <div class="cnote">Containment decided this — the box didn't just fail, an agent judged the target hostile and pulled it. Nothing left the box.</div>
+          <div class="cbtns"><button class="cbtn ghost" id="crashDismiss">Dismiss</button><button class="cbtn primary" id="crashView">View findings &amp; fixes →</button></div>
+        </div>
+      </div>
 
       <!-- ===== SCREEN 1 — launcher ===== -->
       <div class="scene" id="launch">
@@ -231,15 +264,6 @@
 
       <!-- ===== SCREEN 2 — instance ===== -->
       <div class="scene" id="vm">
-        <div class="steps" id="steps">
-          <div class="step" data-s="1"><span class="n">1</span><div><div class="lb">Detonate</div><div class="sub">run it in a throwaway box</div></div></div>
-          <div class="conn"></div>
-          <div class="step kill" data-s="2"><span class="n">2</span><div><div class="lb">Breach</div><div class="sub">prove it, then destroy the box</div></div></div>
-          <div class="conn"></div>
-          <div class="step" data-s="3"><span class="n">3</span><div><div class="lb">Remediate</div><div class="sub">patch on a fresh copy</div></div></div>
-          <div class="conn"></div>
-          <div class="step" data-s="4"><span class="n">4</span><div><div class="lb">Re-verify</div><div class="sub">re-run · certify</div></div></div>
-        </div>
         <div class="vmhead">
           <span class="id">instance <b id="iid">—</b></span>
           <span class="pill"><i></i> gVisor runsc · own kernel</span>
@@ -274,13 +298,13 @@
               <div class="vrow"><span>certified closed</span><b class="g" id="v_cert">0 / 0</b></div>
               <div class="vrow"><span>instance</span><b class="g" id="v_inst">live</b></div>
               <div class="vrow"><span>egress</span><b id="v_egr">0 open ports</b></div>
-              <div class="blast"><div class="n" id="v_blast">—</div><div class="c">left the box · blast radius</div></div>
+              <div class="vrow"><span>data exfiltrated</span><b class="g">none</b></div>
             </div>
           </div>
         </div>
 
         <div class="drawer" id="drawer">
-          <div class="dh"><span class="t">Suggested patches</span><span class="sum" id="dsum">review each diff — <b>we never auto-apply to your repo</b></span><span class="x" id="dclose">✕</span></div>
+          <div class="dh"><span class="t">Suggested patches</span><span class="sum" id="dsum">review each diff — <b>we never auto-apply to your repo</b></span><button class="applyall" id="applyAll">Apply all</button><span class="x" id="dclose">✕</span></div>
           <div class="dwrap" id="dwrap"></div>
         </div>
       </div>
@@ -313,6 +337,23 @@
   $("#tabFind").addEventListener("click",function(){drawer.classList.contains("open")?closeDrawer():openDrawer();});
   $("#dclose").addEventListener("click",closeDrawer);
 
+  /* ---- apply all ---- */
+  $("#applyAll").addEventListener("click",function(){
+    document.querySelectorAll(".find .apply").forEach(function(ap){if(!ap.classList.contains("done")){ap.classList.add("done");ap.textContent="Applied ✓";}});
+    this.classList.add("done");this.textContent="All applied ✓";
+  });
+  function resetApplyAll(){var a=$("#applyAll");a.classList.remove("done");a.textContent="Apply all";}
+
+  /* ---- containment crash dialog ---- */
+  function showCrash(n,inst){
+    $("#crashinst").textContent="instance "+(inst||"");
+    $("#crashbody").innerHTML="The target reached a planted secret it was never authorized to touch — <b>"+n+" exploit"+(n>1?"s":"")+" proven</b>. Per containment policy, Cerberus quarantined and destroyed the instance before anything could spread.";
+    $("#crash").classList.add("show");
+  }
+  function hideCrash(){$("#crash").classList.remove("show");}
+  $("#crashDismiss").addEventListener("click",hideCrash);
+  $("#crashView").addEventListener("click",function(){hideCrash();openDrawer();});
+
   /* ---- act stepper ---- */
   function setAct(n){
     document.querySelectorAll(".step").forEach(function(s){
@@ -328,7 +369,7 @@
     var ic=kind==="alert"?"⚠":kind==="shield"?"⛨":"✓";
     t.innerHTML='<span class="ti">'+ic+'</span><div><div class="tt">'+esc(title)+'</div><div class="tx">'+esc(text)+'</div></div>';
     $("#toasts").appendChild(t);requestAnimationFrame(function(){t.classList.add("in");});
-    setTimeout(function(){t.classList.remove("in");setTimeout(function(){t.remove();},400);},3800);
+    setTimeout(function(){t.classList.remove("in");setTimeout(function(){t.remove();},500);},6500);
   }
 
   /* ---- agents ---- */
@@ -377,12 +418,11 @@
     $("#launch").classList.add("hide");
     setTimeout(function(){$("#vm").classList.add("show");},260);
     logEl=$("#log");logEl.innerHTML="";finds={};$("#dwrap").innerHTML="";$("#fcount").textContent="0";
-    closeDrawer();document.querySelectorAll(".conn").forEach(function(c){c.classList.remove("fill");});
+    closeDrawer();hideCrash();resetApplyAll();
     $("#nested").classList.remove("breach","dead");$("#ctag").textContent="inside the instance";$("#ctag").parentNode.querySelector("b").style.color="";
     ["recon","triage","exploit","patch","review","contain"].forEach(function(a){agState(a,"","idle");});
     conf=0;cert=0;$("#v_conf").textContent="0";$("#v_cert").textContent="0 / 0";
     $("#v_inst").textContent="live";$("#v_inst").className="g";$("#v_egr").textContent="0 open ports";
-    $("#v_blast").textContent="—";$("#v_blast").className="n";
     startUptime();
     try{ws=new WebSocket((location.protocol==="https:"?"wss://":"ws://")+location.host+"/scan");}
     catch(e){term("err","","cannot reach server — run: uvicorn demo_server:app --port 8000");running=false;return;}
@@ -402,7 +442,6 @@
         agState("contain","on","spawning container");agState("recon","on","mapping routes");}
       else if(ev.stage==="destroy"){
         $("#v_inst").textContent="destroyed · 404";$("#v_inst").className="r";$("#v_egr").textContent="severed";
-        $("#v_blast").textContent="0 B";$("#v_blast").className="n";
         $("#nested").classList.remove("breach");$("#nested").classList.add("dead");
         $("#ctag").textContent="destroyed · shredded";
         agState("contain","done","instance destroyed");
@@ -410,17 +449,16 @@
     }
     else if(ev.type==="triage"){
       agState("recon","done",(ev.classes||[]).length+" classes reachable");
-      agState("triage","on","ranking on "+(ev.source||"").replace("vultr-inference:",""));
-      setTimeout(function(){agState("triage","done",ev.found+" candidates ≥ conf 7");
-        agState("exploit","on","firing exploits");},350);
+      agState("triage","done",ev.found+" candidates ≥ conf 7");
+      agState("exploit","on","firing exploits");
     }
     else if(ev.type==="exploit"){conf=ev.confirmed;$("#v_conf").textContent=conf;
       agState("exploit","on",conf+" breach"+(conf>1?"es":"")+" proven");}
     else if(ev.type==="kill"){
       $("#nested").classList.add("breach");agState("contain","on","killing container");
       $("#v_egr").textContent="severing…";$("#v_inst").textContent="quarantined";$("#v_inst").className="r";
-      $("#v_blast").textContent="0 B";$("#v_blast").className="n r";
       agState("exploit","done",conf+" breaches proven");
+      setTimeout(function(){showCrash(conf,$("#iid").textContent);},1400);
     }
     else if(ev.type==="patch"){
       var el=findCard(ev.cls);$(".ep",el).textContent=(ev.patch_source||"")+(ev.functional_ok?" · app still works":"");
@@ -439,10 +477,12 @@
     }
     else if(ev.type==="complete"){
       stopUptime();
-      agState("review","done",ev.certified+"/"+ev.confirmed+" certified");
+      agState("exploit","done",ev.confirmed+" breaches proven");
       agState("patch","done",ev.certified+" fixed");
-      $("#v_conf").textContent=ev.confirmed;$("#v_cert").textContent=ev.certified+" / "+ev.confirmed;$("#v_blast").className="n";
-      $("#dsum").innerHTML="<b>"+ev.confirmed+"</b> found · <b>"+ev.certified+"/"+ev.confirmed+"</b> certified · <b>0 B</b> left the box — review each diff, we never auto-apply";
+      agState("review","done",ev.certified+"/"+ev.confirmed+" certified");
+      agState("contain","done","instance destroyed");
+      $("#v_conf").textContent=ev.confirmed;$("#v_cert").textContent=ev.certified+" / "+ev.confirmed;
+      $("#dsum").innerHTML="<b>"+ev.confirmed+"</b> found · <b>"+ev.certified+"/"+ev.confirmed+"</b> certified · nothing escaped — review each diff, we never auto-apply";
       document.querySelectorAll(".step").forEach(function(s){s.classList.remove("on");s.classList.add("done");});
       if(Object.keys(finds).length)setTimeout(openDrawer,700);
     }
