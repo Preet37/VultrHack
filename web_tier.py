@@ -43,10 +43,11 @@ export DEBIAN_FRONTEND=noninteractive HOME=/root
 {reporter}apt-get update -q && apt-get install -y -q python3-venv curl ca-certificates openssl git-core 2>&1 | tail -1
 cerberus_progress packages_ready || :
 for attempt in 1 2 3 4 5 6; do
-  getent hosts install.netbird.io >/dev/null && break
+  getent hosts pkgs.netbird.io >/dev/null && break
   sleep 5
 done
-curl -fsSL --retry 5 --retry-delay 10 -o /root/netbird-install.sh https://install.netbird.io || {{ cerberus_progress netbird_download_failed || :; false; }}
+curl -fsSL --retry 5 --retry-delay 10 -o /root/netbird-install.sh https://pkgs.netbird.io/install.sh || {{ cerberus_progress netbird_download_failed || :; false; }}
+echo {shlex.quote('991b90c45053fcdd7aa1dccd468403aea29ac8f2f57a9398515d5a4e87628828' + '  /root/netbird-install.sh')} | sha256sum -c -
 sh /root/netbird-install.sh >/root/netbird-install.log 2>&1
 netbird up --setup-key {shlex.quote(netbird_setup_key)} >>/root/netbird-install.log 2>&1
 for i in $(seq 1 20); do netbird status --check ready >/dev/null 2>&1 && break; sleep 3; done
