@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from instance_lifecycle import API_URL, DEFAULT_VX1_PLAN, VultrInstances
+from instance_lifecycle import API_URL, DEFAULT_VX1_PLAN, VultrInstances, block_public_ssh_user_data
 from sandbox_platform import netbird_enrollment_user_data
 
 REPO_URL = "https://github.com/Preet37/VultrHack.git"
@@ -28,14 +28,7 @@ def control_plane_user_data(callback_url, ready_token, setup_key, repo_sha):
     return (
         "#!/bin/sh\n"
         "set -eu\n"
-        "systemctl stop ssh.socket ssh.service\n"
-        "systemctl mask ssh.socket ssh.service\n"
-        "python3 - <<'PY'\n"
-        "import subprocess\n"
-        "listeners = subprocess.check_output(['ss', '-ltnH'], text=True).splitlines()\n"
-        "if any(line.split()[3].rsplit(':', 1)[-1] == '22' for line in listeners):\n"
-        "    raise SystemExit('OpenSSH port 22 remains listening')\n"
-        "PY\n"
+        f"{block_public_ssh_user_data()}"
         "export DEBIAN_FRONTEND=noninteractive\n"
         "apt-get update\n"
         "apt-get install -y git python3-venv curl ca-certificates gnupg\n"

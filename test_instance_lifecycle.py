@@ -34,6 +34,9 @@ def test_create_uses_cloud_init_without_vultr_keys():
     assert payload["block_devices"] == [{"block_id": "local", "bootable": True}]
     assert payload["tags"] == ["cerberus"]
     script = base64.b64decode(payload["user_data"]).decode()
+    assert "systemctl stop ssh.socket ssh.service" in script
+    assert script.index("systemctl stop ssh.socket ssh.service") < script.index("apt-get update")
+    assert "OpenSSH port 22 remains listening" in script
     assert "test -c /dev/kvm" in script
     assert "test -r /dev/kvm" in script
     assert "test -w /dev/kvm" in script
@@ -135,6 +138,31 @@ def test_netbird_test_rejects_open_env_permissions(monkeypatch, tmp_path):
     monkeypatch.setenv("NETBIRD_SANDBOX_SETUP_KEY", "A" * 36)
     with pytest.raises(RuntimeError, match="chmod 600"):
         asyncio.run(verify_instance("https://cerberus.example/internal/ready", "127.0.0.1", 8000, "ord", "vx1-g-2c-8g-120s", 2284, True, True))
+
+
+def test_private_ready_callback_requires_netbird_smoke_and_no_public_http():
+    url = "http://100.124.55.15:8000/internal/ready"
+    script = docker_user_data(url, "ready-token", True, "A" * 36, private_callback=True)
+    assert url in script
+    assert script.count("A" * 36) == 1
+    assert subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True).returncode == 0
+    with pytest.raises(ValueError):
+        docker_user_data(url, "ready-token", True, "A" * 36)
+    with pytest.raises(ValueError):
+        docker_user_data(url, "ready-token", netbird_setup_key="A" * 36, private_callback=True)
+
+
+@pytest.mark.parametrize("url", [
+    "http://192.0.2.10:8000/internal/ready",
+    "http://127.0.0.1:8000/internal/ready",
+    "http://100.124.55.15:8080/internal/ready",
+    "http://100.124.55.15:8000/internal/other",
+    "http://100.124.55.15:8000/internal/ready?key=abc",
+    "http://user@100.124.55.15:8000/internal/ready",
+])
+def test_private_ready_callback_rejects_other_targets(url):
+    with pytest.raises(ValueError, match="NetBird|callback"):
+        docker_user_data(url, "ready-token", True, "A" * 36, private_callback=True)
 
 
 def test_invalid_callback_is_rejected_before_provisioning():

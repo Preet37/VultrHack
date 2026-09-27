@@ -1,5 +1,6 @@
 import asyncio
 import ipaddress
+import os
 import re
 import secrets
 from pathlib import Path
@@ -7,7 +8,7 @@ from typing import Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 
 from instance_lifecycle import ReadySignals
 from jobs import JobRegistry, control_token
@@ -18,7 +19,9 @@ job_registry = JobRegistry()
 
 
 class JobRequest(BaseModel):
-    type: Literal["connectivity"]
+    type: Literal["connectivity", "sandbox_smoke"]
+    approve_vm: bool = False
+    netbird_setup_key: SecretStr | None = None
 
 
 def require_control(authorization):
@@ -126,7 +129,19 @@ callback_app.add_api_route("/internal/control-ready", control_ready, methods=["P
 @app.post("/jobs", status_code=202)
 async def start_job(request: JobRequest, authorization: str | None = Header(default=None)):
     require_control(authorization)
-    job = job_registry.create()
+    if request.type == "sandbox_smoke":
+        if os.getenv("CERBERUS_ENABLE_SANDBOX_JOBS") != "true":
+            raise HTTPException(status_code=503, detail="Sandbox jobs are disabled")
+        if request.approve_vm is not True or request.netbird_setup_key is None:
+            raise HTTPException(status_code=400, detail="Explicit approval and one-off NetBird key required")
+        key = request.netbird_setup_key.get_secret_value()
+        if not re.fullmatch(r"[A-Za-z0-9-]{32,128}", key):
+            raise HTTPException(status_code=400, detail="One-off NetBird key format is invalid")
+        job = job_registry.create(request.type, key, ready_signals)
+    else:
+        if request.approve_vm or request.netbird_setup_key is not None:
+            raise HTTPException(status_code=400, detail="Connectivity jobs do not accept sandbox credentials")
+        job = job_registry.create(request.type)
     if job is None:
         raise HTTPException(status_code=429, detail="Too many active jobs")
     return {"id": job.id, "type": request.type, "status": "queued"}
@@ -138,7 +153,7 @@ async def job_status(job_id: str, authorization: str | None = Header(default=Non
     job = job_registry.jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    return {"id": job.id, "type": "connectivity", "status": job.status}
+    return {"id": job.id, "type": job.kind, "status": job.status}
 
 
 @app.get("/jobs/{job_id}/result")

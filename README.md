@@ -33,7 +33,15 @@ The OpenSandbox preflight in `sandbox_platform.py` rejects a host without `runsc
 
 **The local-only OpenSandbox/gVisor spike passed in `ord`.** The server was authenticated and bound to localhost; the SDK returned a sandbox-owned hostname, gVisor `uname`, and exit code 0. The instance was destroyed and its ID returned 404. This proves the lifecycle integration works for the smoke command, not that outbound network enforcement has been validated. Do not expose the OpenSandbox server publicly or send Vultr keys to it. The optional `--netbird-test --opensandbox-spike` path **passed live between the Mac and one disposable `ord` VX1**: a one-off ephemeral peer joined the dedicated account, OpenSandbox bound its API to the peer's NetBird IPv4, published sandbox ports were verified as loopback-only, and the Mac received a healthy response on the private address while an unauthenticated sandbox-list request was rejected. The sandbox and host were destroyed; the instance ID returned 404. The operator reports that `cerberus-control` → `cerberus-sandbox` TCP/8080 is restricted and the permissive Default policy is disabled; Cerberus has not independently audited the dashboard policy or tested the final VX1-to-VX1 link.
 
-Each run consumes a fresh one-off key from `NETBIRD_SANDBOX_SETUP_KEY` in the ignored, owner-only local `.env`. The key is included in Vultr cloud-init user-data until the instance is deleted, even though its root-only key file is removed after enrollment. Never paste it in chat or put it in a container; remove the used key from `.env` after the run.
+Each manual spike consumes a fresh one-off key from `NETBIRD_SANDBOX_SETUP_KEY` in the ignored, owner-only local `.env`. The key is included in Vultr cloud-init user-data until the instance is deleted, even though its root-only key file is removed after enrollment. Never paste it in chat or put it in a container; remove the used key from `.env` after the run.
+
+## Two-VX1 sandbox smoke (offline implementation only)
+
+The trusted control API now has an operator-only `sandbox_smoke` job type. It is **disabled by default** and requires `CERBERUS_ENABLE_SANDBOX_JOBS=true` in the control-plane service environment, a valid control API bearer token, an explicit `approve_vm: true` request, and a **fresh one-off ephemeral** NetBird key for the `cerberus-sandbox` group. Give the key only to the trusted operator client over the private NetBird API; do not paste it in chat, embed it in public browser code, or put Vultr keys on the sandbox host. Only one sandbox VM job can be active at a time. The current running control VX1 has not been updated with this new code or feature flag.
+
+The disposable VX1 stops and verifies the public OS SSH listener before installing dependencies, then sends a per-run token-protected readiness proof to the control VX1 over NetBird TCP/8000; it never receives the Vultr keys. The control VX1 verifies the OpenSandbox API over NetBird TCP/8080, and the sandbox host uses gVisor on a dedicated internal Docker bridge. Its harmless isolation check attempts a TCP connection to the reserved TEST-NET-1 range and to the bridge gateway on a closed port; a bridge-scoped host INPUT rule logs and drops new host-bound traffic. The job requires denied command exit codes, a positive DROP counter and a **matching real kernel log line**, then reports hostname/`uname`, exit code and bounded evidence only after the sandbox and VM are destroyed. Missing enforcement evidence fails the job rather than reporting containment.
+
+**This path has only offline tests, not a two-VX1 live result.** Before any paid attempt, an account admin must add a narrow **`cerberus-sandbox` → `cerberus-control` TCP/8000** policy for the callback while retaining the existing reverse TCP/8080 policy and keeping Default `All → All` disabled. The operator must supply a fresh ephemeral setup key and approve that specific VX1 create-and-delete run. Host packet/log behavior and the Vultr firewall discrepancy remain unverified on a disposable sandbox; do not run an untrusted repository until containment is demonstrated on the real host.
 
 ## Verification workflow (planned)
 
@@ -54,13 +62,13 @@ Each run consumes a fresh one-off key from `NETBIRD_SANDBOX_SETUP_KEY` in the ig
 - The control-plane VX1 serves FastAPI only on NetBird. A private health check, authenticated read-only connectivity job, and replayed WebSocket events passed live. The VM stays billable until explicitly destroyed.
 - Tests cover configuration aliases, separation of keys, fail-closed VX1 plan selection, callback authentication and host-proof validation, cleanup on error paths, OpenSandbox preflight, and control-API authentication, results, and event replay.
 
-Not yet built: the control-plane-to-sandbox VX1 NetBird link, Next.js UI, sandbox-backed jobs or dynamic repository execution, persistent OpenSandbox integration, network containment enforcement, automated remediation, or signed receipts. The deployed job API is still read-only and in-memory; it does not provision a VM.
+Not yet live-verified: the control-plane-to-sandbox VX1 NetBird link, sandbox-backed jobs and host containment logging. Next.js UI, dynamic repository execution, persistent OpenSandbox integration, automated remediation and signed receipts remain unbuilt. The deployed control VX1 still runs the earlier read-only, in-memory job API; the new sandbox job is disabled and not yet deployed there.
 
 ## Demo acceptance targets
 
 - Show CPU virtualization, `/dev/kvm` presence and read/write access on the VX1 sandbox host. **Passed in `ord`.**
 - Show real container stdout, exit code, and container-owned hostname/`uname`. **The restricted gVisor smoke container passed in `ord`; general per-job output and failure exit-code capture remain planned.**
-- Show an isolation decision backed by an enforcement log, not merely an application message. **Not built.**
+- Show an isolation decision backed by an enforcement log, not merely an application message. **Offline bridge-scoped DROP and kernel-log probe is prepared; no live enforcement log has been captured.**
 - Tear down temporary containers and sandbox hosts and verify none remain. **Disposable VX1 deletion was confirmed via 404 and the smoke sandbox was destroyed by the SDK. The persistent control VX1 intentionally remains running; full job-level teardown is planned.**
 
 ## Local setup

@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import base64
+import ipaddress
 import os
 import re
 import secrets
@@ -12,6 +13,19 @@ from uuid import uuid4
 
 API_URL = "https://api.vultr.com/v2/instances"
 DEFAULT_VX1_PLAN = "vx1-g-2c-8g-120s"
+
+
+def block_public_ssh_user_data():
+    return (
+        "systemctl stop ssh.socket ssh.service\n"
+        "systemctl mask ssh.socket ssh.service\n"
+        "python3 - <<'PY'\n"
+        "import subprocess\n"
+        "listeners = subprocess.check_output(['ss', '-ltnH'], text=True).splitlines()\n"
+        "if any(line.split()[3].rsplit(':', 1)[-1] == '22' for line in listeners):\n"
+        "    raise SystemExit('OpenSSH port 22 remains listening')\n"
+        "PY\n"
+    )
 
 
 class ReadySignals:
@@ -44,17 +58,28 @@ class ReadySignals:
         self._proofs.pop(token, None)
 
 
-def docker_user_data(callback_url, ready_token, opensandbox_spike=False, netbird_setup_key=None):
+def docker_user_data(callback_url, ready_token, opensandbox_spike=False, netbird_setup_key=None, private_callback=False):
     if netbird_setup_key is not None and not opensandbox_spike:
         raise ValueError("NetBird enrollment requires the authenticated OpenSandbox spike")
     url = urlsplit(callback_url)
-    if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment:
+    if private_callback:
+        if not opensandbox_spike or netbird_setup_key is None:
+            raise ValueError("Private callback requires an enrolled NetBird OpenSandbox smoke")
+        try:
+            address = ipaddress.ip_address(url.hostname)
+            port = url.port
+        except (TypeError, ValueError):
+            raise ValueError("Private callback must target the NetBird control peer") from None
+        if url.scheme != "http" or address not in ipaddress.ip_network("100.64.0.0/10") or port != 8000 or url.path != "/internal/ready" or url.username or url.password or url.query or url.fragment:
+            raise ValueError("Private callback must target the NetBird control peer on port 8000")
+    elif url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment:
         raise ValueError("Ready callback must be a public HTTPS URL without credentials or a query string")
     if not ready_token:
         raise ValueError("Ready token is required")
     script = (
         "#!/bin/sh\n"
         "set -eu\n"
+        f"{block_public_ssh_user_data()}"
         "test -c /dev/kvm\n"
         "test -r /dev/kvm\n"
         "test -w /dev/kvm\n"
@@ -95,8 +120,8 @@ class VultrInstances:
         self.client = client
         self.headers = {"Authorization": f"Bearer {api_key}"}
 
-    async def create(self, region, plan, os_id, callback_url, ready_token, opensandbox_spike=False, netbird_setup_key=None):
-        script = docker_user_data(callback_url, ready_token, opensandbox_spike, netbird_setup_key)
+    async def create(self, region, plan, os_id, callback_url, ready_token, opensandbox_spike=False, netbird_setup_key=None, private_callback=False):
+        script = docker_user_data(callback_url, ready_token, opensandbox_spike, netbird_setup_key, private_callback)
         return await self.create_with_user_data(
             region, plan, os_id, f"cerberus-{uuid4().hex[:12]}", ["cerberus"], script, (ready_token, netbird_setup_key)
         )
@@ -163,8 +188,8 @@ class VultrInstances:
 
 
 @asynccontextmanager
-async def temporary_instance(api, region, plan, os_id, callback_url, ready_token, opensandbox_spike=False, netbird_setup_key=None):
-    instance_id = await api.create(region, plan, os_id, callback_url, ready_token, opensandbox_spike, netbird_setup_key)
+async def temporary_instance(api, region, plan, os_id, callback_url, ready_token, opensandbox_spike=False, netbird_setup_key=None, private_callback=False):
+    instance_id = await api.create(region, plan, os_id, callback_url, ready_token, opensandbox_spike, netbird_setup_key, private_callback)
     try:
         yield instance_id
     finally:

@@ -1,8 +1,11 @@
 import asyncio
+import base64
+import json
 import threading
 import time
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
@@ -127,6 +130,44 @@ def test_failed_job_does_not_disclose_upstream_exception(auth, monkeypatch):
         assert "sensitive-upstream-detail" not in result.text
 
 
+def test_sandbox_job_requires_feature_gate_explicit_approval_and_one_off_key(auth, monkeypatch):
+    monkeypatch.delenv("CERBERUS_ENABLE_SANDBOX_JOBS", raising=False)
+    with TestClient(app) as client:
+        body = {"type": "sandbox_smoke", "approve_vm": True, "netbird_setup_key": "A" * 36}
+        assert client.post("/jobs", headers=auth, json=body).status_code == 503
+        monkeypatch.setenv("CERBERUS_ENABLE_SANDBOX_JOBS", "true")
+        assert client.post("/jobs", headers=auth, json={**body, "approve_vm": False}).status_code == 400
+        invalid = client.post("/jobs", headers=auth, json={**body, "netbird_setup_key": "short"})
+        assert invalid.status_code == 400 and "short" not in invalid.text
+        assert client.post("/jobs", headers=auth, json={"type": "connectivity", "netbird_setup_key": "A" * 36}).status_code == 400
+
+
+def test_sandbox_job_events_and_result_never_include_setup_key(auth, monkeypatch):
+    seen = []
+
+    async def fake_smoke(job, key, signals):
+        seen.append((key, signals))
+        await job.publish("running", "provisioning")
+        job.result = {"sandbox": {"hostname": "sandbox", "uname": "Linux 4.19.0-gvisor", "exit_code": 0}, "destroyed": True}
+        await job.publish("completed", "teardown")
+
+    monkeypatch.setenv("CERBERUS_ENABLE_SANDBOX_JOBS", "true")
+    monkeypatch.setattr(jobs, "run_sandbox_smoke_job", fake_smoke)
+    with TestClient(app) as client:
+        start = client.post("/jobs", headers=auth, json={"type": "sandbox_smoke", "approve_vm": True, "netbird_setup_key": "A" * 36})
+        assert start.status_code == 202
+        job_id = start.json()["id"]
+        assert wait_for_terminal(client, job_id, auth)["type"] == "sandbox_smoke"
+        result = client.get(f"/jobs/{job_id}/result", headers=auth)
+        with client.websocket_connect(f"/jobs/{job_id}/events") as websocket:
+            websocket.send_json({"token": CONTROL_TOKEN})
+            events = [websocket.receive_json() for _ in range(3)]
+    assert result.status_code == 200
+    assert seen[0][0] == "A" * 36
+    assert "A" * 36 not in str(result.json()) + str(events)
+    assert [event["step"] for event in events] == ["sandbox_smoke", "provisioning", "teardown"]
+
+
 def test_job_type_and_lookup_are_bounded(auth):
     with TestClient(app) as client:
         assert client.post("/jobs", json={"type": "shell"}, headers=auth).status_code == 422
@@ -138,6 +179,96 @@ def test_registry_refuses_to_start_when_active_jobs_fill_capacity():
     registry = jobs.JobRegistry(max_jobs=1)
     registry.jobs["running"] = jobs.Job(id="running", status="running")
     assert registry.create() is None
+
+
+@pytest.mark.parametrize("readiness_fails,missing_log", [(False, False), (False, True), (True, False)])
+def test_sandbox_worker_proves_private_path_and_cleans_up(monkeypatch, readiness_fails, missing_log):
+    calls = []
+    destroyed = False
+    proof = {
+        "hostname": "vx1", "uname": "Linux vx1", "cpu_virt": "svm", "kvm_device": True,
+        "kvm_access": True, "sandbox_hostname": "smoke", "sandbox_uname": "Linux gvisor",
+        "exit_code": 0, "netbird_ip": "100.124.192.2",
+        "opensandbox": {"hostname": "opensandbox", "uname": "Linux 4.19.0-gvisor", "exit_code": 0,
+            "api_key": "scoped-secret-should-stay-private", "isolation": {
+            "network_id": "a" * 64, "bridge": "br-aaaaaaaaaaaa", "gateway": "172.23.0.1",
+            "unexpected": "secret-in-proof",
+            "test_net_1": {"destination": "192.0.2.1:65000", "exit_code": 1},
+            "host_gateway": {"destination": "172.23.0.1:65000", "exit_code": 1},
+            "host_drop_packets_before": 0, "host_drop_packets_after": 1, "host_drop_packets_delta": 1,
+            "kernel_drop_log": None if missing_log else "cerberus-os-drop IN=br-aaaaaaaaaaaa OUT= DST=172.23.0.1 DPT=65000",
+        }},
+    }
+
+    class Signals:
+        unregistered = False
+
+        def register(self):
+            return "R" * 36
+
+        async def wait(self, token, timeout):
+            if readiness_fails:
+                raise TimeoutError("No callback")
+            return proof
+
+        def unregister(self, token):
+            self.unregistered = token == "R" * 36
+
+    def respond(request):
+        nonlocal destroyed
+        calls.append((request.method, request.url.path))
+        if request.method == "POST":
+            script = base64.b64decode(json.loads(request.content)["user_data"]).decode()
+            assert "http://100.124.55.15:8000/internal/ready" in script
+            assert script.count("A" * 36) == 1
+            assert "account-key" not in script
+            return httpx.Response(202, json={"instance": {"id": "instance-123"}})
+        if request.method == "DELETE":
+            destroyed = True
+            return httpx.Response(204)
+        if request.url.path == "/v2/instances/instance-123":
+            return httpx.Response(404 if destroyed else 200, json={"instance": {"status": "active", "power_status": "running"}})
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "healthy"})
+        return httpx.Response(401)
+
+    monkeypatch.setattr(jobs, "load_keys", lambda: ("account-key", "inference-key"))
+    monkeypatch.setattr(jobs.subprocess, "check_output", lambda *args, **kwargs: json.dumps({
+        "netbirdIp": "100.124.55.15/16", "management": {"connected": True}, "signal": {"connected": True},
+    }))
+    client_type = httpx.AsyncClient
+    monkeypatch.setattr(jobs.httpx, "AsyncClient", lambda **kwargs: client_type(transport=httpx.MockTransport(respond), **kwargs))
+    signals = Signals()
+    job = jobs.Job(kind="sandbox_smoke")
+    asyncio.run(jobs.run_sandbox_smoke_job(job, "A" * 36, signals))
+    assert destroyed and signals.unregistered
+    assert ("DELETE", "/v2/instances/instance-123") in calls
+    assert calls[-1] == ("GET", "/v2/instances/instance-123")
+    assert job.status == ("failed" if readiness_fails or missing_log else "completed")
+    assert "A" * 36 not in str(job.error) + str(job.events)
+    if not readiness_fails and not missing_log:
+        assert job.result["destroyed"] is True
+        assert job.result["opensandbox"]["exit_code"] == 0
+        assert "A" * 36 not in str(job.result) + str(job.events)
+        assert "scoped-secret-should-stay-private" not in str(job.result) + str(job.events)
+        assert "secret-in-proof" not in str(job.result) + str(job.events)
+
+
+def test_registry_allows_only_one_active_sandbox_vm():
+    registry = jobs.JobRegistry()
+    registry.jobs["busy"] = jobs.Job(id="busy", kind="sandbox_smoke", status="running")
+    assert registry.create("sandbox_smoke", "A" * 36, object()) is None
+
+
+def test_sandbox_job_refuses_disconnected_control_peer(monkeypatch):
+    monkeypatch.setattr(jobs.subprocess, "check_output", lambda *args, **kwargs: json.dumps({
+        "netbirdIp": "100.124.55.15/16", "management": {"connected": False}, "signal": {"connected": True},
+    }))
+    monkeypatch.setattr(jobs, "load_keys", lambda: pytest.fail("No account or VM API call should occur"))
+    job = jobs.Job(kind="sandbox_smoke")
+    asyncio.run(jobs.run_sandbox_smoke_job(job, "A" * 36, object()))
+    assert job.status == "failed"
+    assert "A" * 36 not in str(job.events) + str(job.error)
 
 
 def test_websocket_requires_first_message_not_query_token(auth):
