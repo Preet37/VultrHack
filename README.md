@@ -6,7 +6,7 @@ Cerberus is a defensive repository-verification platform under construction. Its
 
 ## Target architecture
 
-This diagram is the **intended** two-instance deployment, not a claim that every component is running today.
+This diagram shows the **intended** two-instance deployment. The control-plane VX1 is now running; the disposable sandbox VX1, browser UI, and full verification loop are still planned.
 
 ```mermaid
 flowchart LR
@@ -50,17 +50,18 @@ Each run consumes a fresh one-off key from `NETBIRD_SANDBOX_SETUP_KEY` in the ig
 - The Vultr client can create, poll, and destroy a temporary instance; it confirms deletion via a 404. An earlier small Cloud Compute VM reached Docker readiness and was confirmed destroyed.
 - **VX1/gVisor host acceptance passed live in `ord`:** the host reported CPU virtualization `svm`, a readable and writable `/dev/kvm`, and Docker default runtime `runsc`. A restricted container returned its own hostname, `4.19.0-gvisor` `uname`, and exit code 0. The instance returned 404 after deletion, and no Cerberus-tagged instances remained.
 - An earlier full `ewr` VX1 stayed `pending` until timeout and was deleted. A minimal `ord` VX1 without cloud-init reached `active` quickly. This does not prove whether the earlier failure was due to region or bootstrap; no resources from either test remain.
-- OpenSandbox/gVisor smoke runs passed on disposable `ord` VX1 hosts using pinned server, SDK, and execd versions. A separate live NetBird smoke run reached the authenticated API from this Mac over the private peer address; the SDK destroyed the harmless sandbox before the VM was deleted. Zero Cerberus instances remained.
+- OpenSandbox/gVisor smoke runs passed on disposable `ord` VX1 hosts using pinned server, SDK, and execd versions. A separate live NetBird smoke run reached the authenticated API from this Mac over the private peer address; the SDK destroyed the harmless sandbox before the VM was deleted. No disposable sandbox instance remains; the persistent control-plane VX1 is running separately.
+- The control-plane VX1 serves FastAPI only on NetBird. A private health check, authenticated read-only connectivity job, and replayed WebSocket events passed live. The VM stays billable until explicitly destroyed.
 - Tests cover configuration aliases, separation of keys, fail-closed VX1 plan selection, callback authentication and host-proof validation, cleanup on error paths, OpenSandbox preflight, and control-API authentication, results, and event replay.
 
-Not yet built: the deployed VX1 control plane and its VX1-to-VX1 NetBird link, Next.js UI, sandbox-backed jobs or dynamic repository execution, persistent OpenSandbox integration, network containment enforcement, automated remediation, or signed receipts. The current job API is local and read-only; it does not provision a VM.
+Not yet built: the control-plane-to-sandbox VX1 NetBird link, Next.js UI, sandbox-backed jobs or dynamic repository execution, persistent OpenSandbox integration, network containment enforcement, automated remediation, or signed receipts. The deployed job API is still read-only and in-memory; it does not provision a VM.
 
 ## Demo acceptance targets
 
 - Show CPU virtualization, `/dev/kvm` presence and read/write access on the VX1 sandbox host. **Passed in `ord`.**
 - Show real container stdout, exit code, and container-owned hostname/`uname`. **The restricted gVisor smoke container passed in `ord`; general per-job output and failure exit-code capture remain planned.**
 - Show an isolation decision backed by an enforcement log, not merely an application message. **Not built.**
-- Tear down containers and hosts and verify nothing remains. **VX1 deletion was confirmed via 404; the OpenSandbox smoke sandbox was destroyed by the SDK. Full job-level teardown remains planned.**
+- Tear down temporary containers and sandbox hosts and verify none remain. **Disposable VX1 deletion was confirmed via 404 and the smoke sandbox was destroyed by the SDK. The persistent control VX1 intentionally remains running; full job-level teardown is planned.**
 
 ## Local setup
 
@@ -100,15 +101,17 @@ Set a separate `CERBERUS_CONTROL_TOKEN` of at least 32 random characters in the 
 - `GET /jobs/{id}` reports `queued`, `running`, `completed`, or `failed`. `GET /jobs/{id}/result` returns 202 while pending, a successful model list and region count when complete, or a generic 502 on upstream failure. Upstream errors and tokens are not returned to clients.
 - `WS /jobs/{id}/events` replays earlier events and streams new ones. Authenticate with the **first WebSocket JSON message** `{"token":"<control token>"}`, not a URL query parameter. Use WSS if deployed remotely.
 
-Jobs and events are bounded and held **in memory only**: a process restart loses them, and this prototype is intended for one trusted local controller process. A public browser UI needs proper session authentication before it can safely use these endpoints.
+Jobs and events are bounded and held **in memory only**: a process restart loses them, and this prototype runs in a single trusted controller process, locally or on the private VX1. A public browser UI needs proper session authentication before it can safely use these endpoints.
 
-## Persistent control-plane VX1 (prepared, not deployed)
+## Persistent control-plane VX1 (live)
 
-`control_plane.py` prepares a separate Ubuntu 24.04 VX1 in `ord` for the **control plane**, not for sandbox execution. Its bootstrap contains only a one-off, non-ephemeral NetBird key and a scoped readiness token; it never contains either Vultr key or the API control token. It enrolls with a one-off key intended for `cerberus-control` (check its dashboard auto-group), attempts to mask the public OS SSH service and socket, enables NetBird SSH/SFTP with user authentication and root login disabled, clones a specific pushed repository commit, installs the pinned Python requirements, and prepares a non-root systemd service that binds only to its own NetBird address. The service does not start until an owner-only credentials file has arrived. This path is **not yet live-verified**.
+`control_plane.py` provisioned one persistent Ubuntu 24.04 VX1 in `ord` from a pinned pushed commit. Cloud-init carried only a one-off NetBird control-peer key and scoped readiness token, **never** either Vultr key or the API control token. The provisioning path replaced and verified the one-off-key user-data afterward. The account key, inference key, and a distinct `CERBERUS_CONTROL_TOKEN` were transferred through authenticated NetBird SSH standard input into an owner-only `600` file for the non-root `cerberus` service. The FastAPI service binds only to its verified NetBird IPv4.
 
-After a successful bootstrap, the provisioning path replaces Vultr user-data with a harmless script and verifies the replacement, so the used NetBird enrollment key is no longer retained there. It keeps a healthy control-plane VM running; a failed bootstrap is set to destroy its own VM. This is a **persistent billable server**, unlike the temporary sandbox host, and requires separate approval before provisioning.
+**Verified live:** Private `/health` returned 200; an unauthenticated job start returned 401; an authenticated read-only connectivity job checked inference models, the protected Vultr account, and regions and returned 200. Its WebSocket replay delivered `queued → running → completed`. Public IPv4 TCP/22, TCP/22022, and TCP/8000 were unreachable in external checks. Vultr API access from the control VM required adding only that VM's public IPv4 as a `/32` to the account allowlist. This one control VX1 remains **running and billable** (the plan was listed at $0.076/hour); there is no deployed disposable sandbox peer alongside it yet.
 
-A private-transfer helper is prepared to send only `VULTR_API_KEY`, `VULTR_INFERENCE_API_KEY`, and a distinct `CERBERUS_CONTROL_TOKEN` from the owner's Mac to the VM's restricted `cerberus` account via NetBird SSH standard input, not shell arguments. It has not yet been exercised against a live control VM. Before deployment, create a fresh **one-off, non-ephemeral** `cerberus-control` NetBird setup key, store it only as `NETBIRD_CONTROL_SETUP_KEY` in the ignored `.env`, and generate a separate random `CERBERUS_CONTROL_TOKEN` there. Configure a narrow operator-to-control NetBird SSH policy permitting the `cerberus` OS user and TCP/8000 for the private API. Once the VM exists, add **its specific public IP as a /32** to the Vultr account API access list before running account-authenticated jobs from it; do not allow all IPs. Never paste these keys into chat. Commit and push the intended code before provisioning; the CLI checks that the local main commit matches GitHub.
+**Security and rollout limitations:** During the live bootstrap, masking `ssh.service` did not stop the already-running public OpenSSH listener; it was stopped manually in the Vultr Console. A Vultr firewall group with zero inbound rules was linked to the VM but did **not** block public port 22 while OpenSSH was running, contrary to the documented default-deny behavior. Do not rely on that group for containment until Vultr explains or fixes the discrepancy. The enrollment script also left a restrictive shell `umask` that made the root-owned code and venv inaccessible to the non-root service; permissions were repaired on the VM. Minimal Uvicorn lacked WebSocket support, so `websockets==15.0.1` was installed on the VM. The updated repository bootstrap now stops and checks OS SSH early, restores the previous `umask`, creates API-key files with a restrictive `umask`, and pins the WebSocket dependency; **these source fixes have not been rolled out to the already-running VM**, which was repaired separately.
+
+For a future replacement VM, commit and push the intended code first, create a fresh one-off **non-ephemeral** `cerberus-control` setup key and configure the limited NetBird SSH and TCP/8000 operator policies before enrollment. Remove the **used** `NETBIRD_CONTROL_SETUP_KEY` from the Mac's ignored `.env`; it cannot enroll another peer. Never paste credentials in chat or user-data. Destroying the persistent VX1 later requires separate approval and removes its local NVMe.
 
 ## Temporary instance check
 

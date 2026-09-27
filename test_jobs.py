@@ -1,6 +1,7 @@
 import asyncio
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -10,6 +11,10 @@ import jobs
 from main import app
 
 CONTROL_TOKEN = "test-" + "x" * 40
+
+
+def test_uvicorn_deployment_includes_websocket_protocol():
+    assert "websockets==15.0.1" in Path(__file__).with_name("requirements.txt").read_text().splitlines()
 
 
 @pytest.fixture

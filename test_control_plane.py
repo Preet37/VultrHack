@@ -21,6 +21,11 @@ def test_bootstrap_contains_one_off_netbird_key_but_no_vultr_credentials():
     script = control_plane_user_data(CALLBACK_URL, "r" * 32, "C" * 36, REPO_SHA)
     assert script.count("C" * 36) == 1
     assert "netbird up --setup-key-file" in script
+    assert "systemctl stop ssh.socket ssh.service" in script
+    assert script.index("systemctl stop ssh.socket ssh.service") < script.index("apt-get update")
+    assert "systemctl mask ssh.socket ssh.service" in script
+    assert "OpenSSH port 22 remains listening" in script
+    assert script.index('umask "$saved_umask"') < script.index("git clone --depth=1")
     assert "--allow-server-ssh" in script
     assert "--enable-ssh-sftp" in script
     assert "--enable-ssh-root" not in script

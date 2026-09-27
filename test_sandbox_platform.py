@@ -50,6 +50,7 @@ def test_spike_bootstrap_is_local_only_pinned_and_syntactically_valid():
     assert "docker network create --internal --driver bridge --opt com.docker.network.bridge.host_binding_ipv4=127.0.0.1 cerberus-internal" in script
     assert "sandbox_platform.py" in script
     assert "build_opensandbox_config" in script
+    assert "os.umask(0o077)" in script
     assert '"http://$server_host:8080/health"' in script
     assert "sandbox.commands.run('hostname; uname -a')" in script
     assert "HostIp" in script
@@ -131,7 +132,10 @@ def test_one_off_netbird_key_is_used_only_from_a_root_only_file():
     script = netbird_enrollment_user_data("A" * 36)
     assert "netbird=0.79.0" in script
     assert "netbird up --setup-key-file /root/cerberus-netbird-setup.key" in script
+    assert "saved_umask=$(umask)" in script
     assert "umask 077" in script
+    assert 'umask "$saved_umask"' in script
+    assert script.index("umask 077") < script.index("netbird up --setup-key-file") < script.index('umask "$saved_umask"')
     assert "netbird status --check ready" in script
     assert script.count("A" * 36) == 1
     assert subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True).returncode == 0

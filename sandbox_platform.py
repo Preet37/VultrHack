@@ -91,11 +91,13 @@ def netbird_enrollment_user_data(setup_key, ssh_sftp=False):
         "apt-get update\n"
         "apt-get install -y netbird=0.79.0\n"
         "systemctl enable --now netbird\n"
+        "saved_umask=$(umask)\n"
         "umask 077\n"
         f"printf '%s' {shlex.quote(setup_key)} > /root/cerberus-netbird-setup.key\n"
         "trap 'rm -f /root/cerberus-netbird-setup.key' EXIT\n"
         f"netbird up --setup-key-file /root/cerberus-netbird-setup.key{ssh_flags}\n"
         "rm /root/cerberus-netbird-setup.key\n"
+        'umask "$saved_umask"\n'
         "netbird status --check ready\n"
     )
 
@@ -118,6 +120,7 @@ def opensandbox_spike_user_data(netbird=False):
         "docker pull opensandbox/execd:v1.0.22\n"
         "PYTHONPATH=/root python3 - <<'PY'\n"
         "import json\n"
+        "import os\n"
         "import subprocess\n"
         "from pathlib import Path\n"
         "from sandbox_platform import build_opensandbox_config\n"
@@ -125,6 +128,7 @@ def opensandbox_spike_user_data(netbird=False):
         "network = json.loads(subprocess.check_output(['docker', 'network', 'inspect', 'cerberus-internal']))[0]\n"
         f"{status_line}"
         f"config, key = build_opensandbox_config(info, network{', netbird_status=status' if netbird else ''})\n"
+        "os.umask(0o077)\n"
         "Path('/root/.sandbox.toml').write_text(config)\n"
         "Path('/root/.sandbox.toml').chmod(0o600)\n"
         "Path('/root/.opensandbox-key').write_text(key)\n"
