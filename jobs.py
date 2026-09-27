@@ -5,6 +5,7 @@ import os
 import re
 import secrets
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
@@ -71,8 +72,37 @@ class JobRegistry:
         self.max_jobs = max_jobs
         self.jobs = {}
         self.tasks = set()
+        self.arm_token = None
+        self.arm_expires = 0.0
+        self.arm_hold_seconds = 0
 
-    def create(self, kind="connectivity", setup_key=None, signals=None, vpc_mode=False, target=None):
+    def arm_sandbox(self, ttl_seconds=120, diagnostic_hold_seconds=0):
+        if type(ttl_seconds) is not int or not 1 <= ttl_seconds <= 300 or type(diagnostic_hold_seconds) is not int or not 0 <= diagnostic_hold_seconds <= 300:
+            raise ValueError("Sandbox arm and diagnostic hold must be bounded")
+        if self.arm_token and time.monotonic() < self.arm_expires:
+            return None
+        if any(job.kind == "sandbox_smoke" and job.status not in TERMINAL for job in self.jobs.values()):
+            return None
+        self.arm_token = secrets.token_urlsafe(32)
+        self.arm_expires = time.monotonic() + ttl_seconds
+        self.arm_hold_seconds = diagnostic_hold_seconds
+        return self.arm_token
+
+    def consume_sandbox_arm(self, token):
+        if not self.arm_token or time.monotonic() >= self.arm_expires:
+            self.arm_token = None
+            self.arm_expires = 0.0
+            self.arm_hold_seconds = 0
+            return None
+        if not isinstance(token, str) or not secrets.compare_digest(token, self.arm_token):
+            return None
+        hold = self.arm_hold_seconds
+        self.arm_token = None
+        self.arm_expires = 0.0
+        self.arm_hold_seconds = 0
+        return hold
+
+    def create(self, kind="connectivity", setup_key=None, signals=None, vpc_mode=False, target=None, diagnostic_hold_seconds=None):
         if kind not in ("connectivity", "sandbox_smoke", "scan"):
             raise ValueError("Unsupported job type")
         if kind == "sandbox_smoke":
@@ -98,7 +128,8 @@ class JobRegistry:
         elif kind == "scan":
             worker = run_scan_job(job, target)
         elif vpc_mode:
-            worker = run_sandbox_smoke_job(job, setup_key, signals, vpc_mode=True)
+            options = {"diagnostic_hold_seconds": diagnostic_hold_seconds} if diagnostic_hold_seconds is not None else {}
+            worker = run_sandbox_smoke_job(job, setup_key, signals, vpc_mode=True, **options)
         else:
             worker = run_sandbox_smoke_job(job, setup_key, signals)
         task = asyncio.create_task(worker)
@@ -207,7 +238,7 @@ async def run_scan_job(job, target_name):
         await asyncio.to_thread(runner.stop)
 
 
-async def run_sandbox_smoke_job(job, setup_key, signals, vpc_mode=False):
+async def run_sandbox_smoke_job(job, setup_key, signals, vpc_mode=False, diagnostic_hold_seconds=None):
     from instance_lifecycle import DEFAULT_VX1_PLAN, VultrInstances, temporary_instance, validated_vpc_id, validated_vpc_subnet
     from sandbox_platform import HOST_PROBE_LOG_PREFIX, PROBE_PORT, VPC_INTERNAL_SUBNET, check_private_endpoint
 
@@ -229,7 +260,7 @@ async def run_sandbox_smoke_job(job, setup_key, signals, vpc_mode=False):
             address = ipaddress.ip_interface(status["netbirdIp"]).ip
             if status["management"]["connected"] is not True or status["signal"]["connected"] is not True or address not in ipaddress.ip_network("100.64.0.0/10"):
                 raise ValueError("Connected NetBird control peer required")
-        raw_hold = os.getenv("CERBERUS_DIAGNOSTIC_HOLD_SECONDS", "0")
+        raw_hold = str(diagnostic_hold_seconds) if diagnostic_hold_seconds is not None else os.getenv("CERBERUS_DIAGNOSTIC_HOLD_SECONDS", "0")
         if not re.fullmatch(r"[0-9]{1,3}", raw_hold) or int(raw_hold) > 300:
             raise ValueError("Diagnostic hold must be between 0 and 300 seconds")
         diagnostic_hold = int(raw_hold)

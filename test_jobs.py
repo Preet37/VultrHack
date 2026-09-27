@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 import jobs
-from main import app
+from main import app, vpc_callback_app
 
 CONTROL_TOKEN = "test-" + "x" * 40
 
@@ -162,6 +162,68 @@ def test_vpc_sandbox_job_needs_no_setup_key_but_still_requires_explicit_approval
         assert r.status_code == 202
         assert wait_for_terminal(client, r.json()["id"], auth)["status"] == "completed"
     assert seen == [(None, True)]
+
+
+@pytest.mark.parametrize("hold_seconds", [0, 300])
+def test_single_use_arm_starts_only_one_approved_vpc_job_with_gate_off(auth, monkeypatch, hold_seconds):
+    seen = []
+
+    async def fake_smoke(job, key, signals, vpc_mode=False, diagnostic_hold_seconds=None):
+        seen.append((key, vpc_mode, diagnostic_hold_seconds))
+        job.result = {"destroyed": True}
+        await job.publish("completed")
+
+    monkeypatch.delenv("CERBERUS_ENABLE_SANDBOX_JOBS", raising=False)
+    for name, value in (("CERBERUS_VPC_ID", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                        ("CERBERUS_CONTROL_INSTANCE_ID", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+                        ("CERBERUS_CONTROL_VPC_IP", "10.52.0.2"), ("CERBERUS_VPC_SUBNET", "10.52.0.0/24")):
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(jobs, "run_sandbox_smoke_job", fake_smoke)
+    with TestClient(app) as client:
+        assert client.post("/jobs/arm-sandbox", json={"approve_vm": True}).status_code == 401
+        assert client.post("/jobs/arm-sandbox", headers=auth, json={"approve_vm": False}).status_code == 400
+        assert client.post("/jobs/arm-sandbox", headers=auth, json={"approve_vm": "true"}).status_code == 422
+        assert client.post("/jobs/arm-sandbox", headers=auth, json={"approve_vm": True, "ttl_seconds": True}).status_code == 422
+        assert client.post("/jobs/arm-sandbox", headers=auth, json={"approve_vm": True, "diagnostic_hold_seconds": True}).status_code == 422
+        assert client.post("/jobs/arm-sandbox", headers=auth, json={"approve_vm": True, "ttl_seconds": 301}).status_code == 400
+        assert client.post("/jobs/arm-sandbox", headers=auth, json={"approve_vm": True, "diagnostic_hold_seconds": 301}).status_code == 400
+        armed = client.post("/jobs/arm-sandbox", headers=auth, json={"approve_vm": True, "ttl_seconds": 120, "diagnostic_hold_seconds": hold_seconds})
+        assert armed.status_code == 201
+        assert armed.json()["diagnostic_hold_seconds"] == hold_seconds
+        arm_token = armed.json()["arm_token"]
+        assert len(arm_token) >= 32
+        assert client.post("/jobs/arm-sandbox", headers=auth, json={"approve_vm": True}).status_code == 429
+        assert client.post("/jobs", headers=auth, json={"type": "connectivity", "arm_token": arm_token}).status_code == 400
+        assert client.post("/jobs", headers=auth, json={"type": "scan", "target": "seeded_flask", "arm_token": arm_token}).status_code == 400
+        body = {"type": "sandbox_smoke", "approve_vm": True}
+        assert client.post("/jobs", headers=auth, json=body).status_code == 503
+        assert client.post("/jobs", headers=auth, json={**body, "arm_token": "wrong"}).status_code == 403
+        assert client.post("/jobs", headers=auth, json={**body, "arm_token": arm_token, "netbird_setup_key": "A" * 36}).status_code == 400
+        start = client.post("/jobs", headers=auth, json={**body, "arm_token": arm_token})
+        assert start.status_code == 202
+        assert wait_for_terminal(client, start.json()["id"], auth)["status"] == "completed"
+        assert client.post("/jobs", headers=auth, json={**body, "arm_token": arm_token}).status_code == 403
+        result = client.get(f"/jobs/{start.json()['id']}/result", headers=auth)
+        with client.websocket_connect(f"/jobs/{start.json()['id']}/events") as websocket:
+            websocket.send_json({"token": CONTROL_TOKEN})
+            events = [websocket.receive_json() for _ in range(2)]
+    with TestClient(vpc_callback_app) as client:
+        assert client.post("/jobs/arm-sandbox", headers=auth, json={"approve_vm": True}).status_code == 404
+    assert seen == [(None, True, hold_seconds)]
+    assert arm_token not in str(result.json()) + str(events)
+
+
+def test_sandbox_arm_expires_without_creating_a_job():
+    registry = jobs.JobRegistry()
+    with pytest.raises(ValueError):
+        registry.arm_sandbox(ttl_seconds=120, diagnostic_hold_seconds=301)
+    registry.jobs["active"] = jobs.Job(kind="sandbox_smoke", status="running")
+    assert registry.arm_sandbox(ttl_seconds=120) is None
+    registry.jobs["active"].status = "completed"
+    token = registry.arm_sandbox(ttl_seconds=120)
+    registry.arm_expires = 0
+    assert not registry.consume_sandbox_arm(token)
+    assert not registry.consume_sandbox_arm(token)
 
 
 def test_sandbox_job_events_and_result_never_include_setup_key(auth, monkeypatch):
@@ -362,10 +424,11 @@ def test_vpc_worker_proves_private_connection_without_a_netbird_setup_key(monkey
                         ("VULTR_REGION", "ord")):
         monkeypatch.setenv(name, value)
     monkeypatch.setattr(jobs, "load_keys", lambda: ("account-key", "inference-key"))
+    monkeypatch.setenv("CERBERUS_DIAGNOSTIC_HOLD_SECONDS", "301")
     client_type = httpx.AsyncClient
     monkeypatch.setattr(jobs.httpx, "AsyncClient", lambda **kwargs: client_type(transport=httpx.MockTransport(respond), **kwargs))
     job = jobs.Job(kind="sandbox_smoke")
-    asyncio.run(jobs.run_sandbox_smoke_job(job, None, Signals(), vpc_mode=True))
+    asyncio.run(jobs.run_sandbox_smoke_job(job, None, Signals(), vpc_mode=True, diagnostic_hold_seconds=0))
     assert job.status == ("completed" if reported_ip == "10.52.0.3" else "failed") and destroyed
     if reported_ip == "10.52.0.3":
         assert job.result["destroyed"] and job.result["opensandbox"]["isolation"]["dns_external"]["exit_code"] == 1

@@ -8,7 +8,7 @@ from typing import Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-from pydantic import BaseModel, SecretStr
+from pydantic import BaseModel, SecretStr, StrictBool, StrictInt
 
 from instance_lifecycle import ReadySignals
 from jobs import JobRegistry, SCAN_TARGETS, control_token
@@ -27,9 +27,16 @@ BOOTSTRAP_STAGES = frozenset({
 
 class JobRequest(BaseModel):
     type: Literal["connectivity", "sandbox_smoke", "scan"]
-    approve_vm: bool = False
+    approve_vm: StrictBool = False
     netbird_setup_key: SecretStr | None = None
+    arm_token: SecretStr | None = None
     target: str | None = None
+
+
+class SandboxArmRequest(BaseModel):
+    approve_vm: StrictBool = False
+    ttl_seconds: StrictInt = 120
+    diagnostic_hold_seconds: StrictInt = 0
 
 
 def require_control(authorization):
@@ -210,17 +217,37 @@ async def control_server_app(scope, receive, send):
         await Response(status_code=404)(scope, receive, send)
 
 
+@app.post("/jobs/arm-sandbox", status_code=201)
+async def arm_sandbox_job(request: SandboxArmRequest, authorization: str | None = Header(default=None)):
+    require_control(authorization)
+    if request.approve_vm is not True or not 1 <= request.ttl_seconds <= 300 or not 0 <= request.diagnostic_hold_seconds <= 300:
+        raise HTTPException(status_code=400, detail="Explicit approval and bounded arm/hold durations required")
+    if os.getenv("CERBERUS_ENABLE_SANDBOX_JOBS") == "true":
+        raise HTTPException(status_code=400, detail="Sandbox jobs are already enabled")
+    if not all(os.getenv(name) for name in ("CERBERUS_VPC_ID", "CERBERUS_CONTROL_INSTANCE_ID", "CERBERUS_CONTROL_VPC_IP", "CERBERUS_VPC_SUBNET")):
+        raise HTTPException(status_code=503, detail="VPC sandbox jobs are not configured")
+    token = job_registry.arm_sandbox(request.ttl_seconds, request.diagnostic_hold_seconds)
+    if token is None:
+        raise HTTPException(status_code=429, detail="Sandbox job already armed or active")
+    return {"arm_token": token, "expires_in": request.ttl_seconds, "diagnostic_hold_seconds": request.diagnostic_hold_seconds}
+
+
 @app.post("/jobs", status_code=202)
 async def start_job(request: JobRequest, authorization: str | None = Header(default=None)):
     require_control(authorization)
     if request.type == "sandbox_smoke":
         if request.target is not None:
             raise HTTPException(status_code=400, detail="Sandbox jobs do not accept a target")
-        if os.getenv("CERBERUS_ENABLE_SANDBOX_JOBS") != "true":
+        enabled = os.getenv("CERBERUS_ENABLE_SANDBOX_JOBS") == "true"
+        if not enabled and request.arm_token is None:
             raise HTTPException(status_code=503, detail="Sandbox jobs are disabled")
+        if enabled and request.arm_token is not None:
+            raise HTTPException(status_code=400, detail="Sandbox arm is unnecessary while jobs are enabled")
         if request.approve_vm is not True:
             raise HTTPException(status_code=400, detail="Explicit VM approval required")
         if request.netbird_setup_key is not None:
+            if not enabled:
+                raise HTTPException(status_code=400, detail="Sandbox arm applies only to the VPC path")
             key = request.netbird_setup_key.get_secret_value()
             if not re.fullmatch(r"[A-Za-z0-9-]{32,128}", key):
                 raise HTTPException(status_code=400, detail="One-off NetBird key format is invalid")
@@ -228,9 +255,15 @@ async def start_job(request: JobRequest, authorization: str | None = Header(defa
         else:
             if not all(os.getenv(name) for name in ("CERBERUS_VPC_ID", "CERBERUS_CONTROL_INSTANCE_ID", "CERBERUS_CONTROL_VPC_IP", "CERBERUS_VPC_SUBNET")):
                 raise HTTPException(status_code=503, detail="VPC sandbox jobs are not configured")
-            job = job_registry.create(request.type, None, ready_signals, vpc_mode=True)
+            if enabled:
+                job = job_registry.create(request.type, None, ready_signals, vpc_mode=True)
+            else:
+                hold = job_registry.consume_sandbox_arm(request.arm_token.get_secret_value())
+                if hold is None:
+                    raise HTTPException(status_code=403, detail="Sandbox arm is invalid or expired")
+                job = job_registry.create(request.type, None, ready_signals, vpc_mode=True, diagnostic_hold_seconds=hold)
     elif request.type == "scan":
-        if request.approve_vm or request.netbird_setup_key is not None:
+        if request.approve_vm or request.netbird_setup_key is not None or request.arm_token is not None:
             raise HTTPException(status_code=400, detail="Scan jobs do not accept sandbox credentials")
         if request.target not in SCAN_TARGETS:
             raise HTTPException(status_code=400, detail="Unknown scan target")
@@ -238,7 +271,7 @@ async def start_job(request: JobRequest, authorization: str | None = Header(defa
             raise HTTPException(status_code=503, detail="Local scan jobs are disabled")
         job = job_registry.create(request.type, target=request.target)
     else:
-        if request.approve_vm or request.netbird_setup_key is not None:
+        if request.approve_vm or request.netbird_setup_key is not None or request.arm_token is not None:
             raise HTTPException(status_code=400, detail="Connectivity jobs do not accept sandbox credentials")
         if request.target is not None:
             raise HTTPException(status_code=400, detail="Connectivity jobs do not accept a target")
