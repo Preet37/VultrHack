@@ -186,6 +186,7 @@ def microsandbox_run_user_data(source_url, entrypoint, vpc_subnet):
     port = TARGET_CONTAINER_PORT
     return (
         "cerberus_report_stage microsandbox_install\n"
+        "export HOME=/root\n"
         f"if ! (curl -fsSL --max-time 120 -o /root/msb-install.sh {shlex.quote('https://install.microsandbox.dev')} && echo {shlex.quote(MICROSANDBOX_INSTALLER_SHA256 + '  /root/msb-install.sh')} | sha256sum -c - && sh /root/msb-install.sh) >/root/cerberus-msbinstall.log 2>&1; then tail -c 240 /root/cerberus-msbinstall.log | tr -cd '[:print:] ' > /root/cerberus-detail; false; fi\n"
         "rm /root/msb-install.sh\n"
         "export PATH=\"/root/.local/bin:/root/.microsandbox/bin:$PATH\"\n"
