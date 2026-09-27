@@ -148,20 +148,26 @@ async def instance_failed(request: Request, authorization: str | None = Header(d
     token = authorization[7:] if authorization and authorization.startswith("Bearer ") else ""
     if not ready_signals.has(token):
         raise HTTPException(status_code=404)
-    if len(await request.body()) > 512:
+    if len(await request.body()) > 1024:
         raise HTTPException(status_code=413)
     try:
         report = await request.json()
     except ValueError:
         raise HTTPException(status_code=400)
     if (
-        not isinstance(report, dict) or set(report) != {"stage", "exit_code"}
+        not isinstance(report, dict) or not set(report) <= {"stage", "exit_code", "detail"}
         or not isinstance(report["stage"], str)
         or report["stage"] not in BOOTSTRAP_STAGES
         or type(report["exit_code"]) is not int or not 1 <= report["exit_code"] <= 255
     ):
         raise HTTPException(status_code=400)
-    if not ready_signals.signal(token, {"failure_stage": report["stage"], "exit_code": report["exit_code"]}):
+    detail = report.get("detail")
+    if detail is not None and (not isinstance(detail, str) or len(detail) > 300 or not detail.isprintable()):
+        raise HTTPException(status_code=400)
+    proof = {"failure_stage": report["stage"], "exit_code": report["exit_code"]}
+    if detail:
+        proof["failure_detail"] = detail
+    if not ready_signals.signal(token, proof):
         raise HTTPException(status_code=404)
     return Response(status_code=204)
 

@@ -608,8 +608,10 @@ def test_private_failure_callback_rejects_untrusted_details_and_signals_safe_sta
                 assert (await client.post(path, headers=headers, json={"stage": "arbitrary", "exit_code": 1})).status_code == 400
                 assert (await client.post(path, headers=headers, json={"stage": "isolation_probe", "exit_code": 0})).status_code == 400
                 assert (await client.post(path, headers=headers, json={"stage": "isolation_probe", "exit_code": 1, "secret": "should-not-arrive"})).status_code == 400
+                assert (await client.post(path, headers=headers, json={"stage": "isolation_probe", "exit_code": 1, "detail": "x" * 301})).status_code == 400
                 assert (await client.post(path, headers=headers, json={"stage": "isolation_probe", "exit_code": 1})).status_code == 204
-            assert await ready_signals.wait(token, timeout=0.1) == {"failure_stage": "isolation_probe", "exit_code": 1}
+                assert (await client.post(path, headers=headers, json={"stage": "isolation_probe", "exit_code": 1, "detail": "container=exited exit=1"})).status_code == 204
+            assert await ready_signals.wait(token, timeout=0.1) == {"failure_stage": "isolation_probe", "exit_code": 1, "failure_detail": "container=exited exit=1"}
         finally:
             ready_signals.unregister(token)
 

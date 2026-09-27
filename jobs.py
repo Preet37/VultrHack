@@ -317,6 +317,7 @@ async def run_sandbox_smoke_job(job, setup_key, signals, vpc_mode=False, diagnos
     token = None
     failure_stage = None
     readiness_timed_out = False
+    failure_detail = None
     await job.publish("running", "preflight")
     try:
         if vpc_mode:
@@ -379,6 +380,7 @@ async def run_sandbox_smoke_job(job, setup_key, signals, vpc_mode=False, diagnos
                     raise
                 if "failure_stage" in proof:
                     failure_stage = proof["failure_stage"]
+                    failure_detail = proof.get("failure_detail")
                     await hold_for_diagnostics()
                     raise RuntimeError("Sandbox bootstrap reported a bounded failure stage")
                 sandbox = proof.get("opensandbox")
@@ -432,6 +434,8 @@ async def run_sandbox_smoke_job(job, setup_key, signals, vpc_mode=False, diagnos
     except Exception as error:
         last_stage = signals.stage(token) if token is not None else None
         detail = f"{type(error).__name__}; stage={failure_stage or last_stage or 'none'}"
+        if failure_detail:
+            detail = f"{detail}; guest={failure_detail[:200]}"
         job.error = (
             f"Sandbox smoke failed ({detail}); verify cleanup of instance {instance_id}"
             if instance_id else f"Sandbox smoke failed ({detail}) before an instance ID was confirmed"
@@ -469,6 +473,7 @@ async def run_sandbox_scan_job(job, target_name, signals):
     instance_id = None
     token = None
     failure_stage = None
+    failure_detail = None
     storage = None
     bucket = None
     object_key = None
@@ -530,6 +535,7 @@ async def run_sandbox_scan_job(job, target_name, signals):
                 proof = await signals.wait(token, timeout=600)
                 if "failure_stage" in proof:
                     failure_stage = proof["failure_stage"]
+                    failure_detail = proof.get("failure_detail")
                     raise RuntimeError("Sandbox bootstrap reported a bounded failure stage")
                 base_url = f"http://{sandbox_ip}:8081"
                 if proof.get("runtime") != "runsc" or proof.get("vpc_ip") != sandbox_ip or proof.get("target") != "healthy" or proof.get("endpoint") != base_url:
@@ -568,6 +574,8 @@ async def run_sandbox_scan_job(job, target_name, signals):
     except Exception as error:
         last_stage = signals.stage(token) if token is not None else None
         detail = f"{type(error).__name__}; stage={failure_stage or last_stage or 'none'}"
+        if failure_detail:
+            detail = f"{detail}; guest={failure_detail[:200]}"
         job.error = (
             f"Sandbox scan failed ({detail}); verify cleanup of instance {instance_id}"
             if instance_id else f"Sandbox scan failed ({detail}) before an instance ID was confirmed"
