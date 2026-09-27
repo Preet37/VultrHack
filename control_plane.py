@@ -87,6 +87,8 @@ def control_plane_user_data(callback_url, ready_token, setup_key, repo_sha):
         "install -d -m 700 -o cerberus -g cerberus /home/cerberus/.config/cerberus\n"
         "cat > /usr/local/bin/cerberus-control-start <<'PY'\n"
         "#!/opt/cerberus-venv/bin/python3\n"
+        "import sys\n"
+        "sys.path.insert(0, \"/opt/cerberus\")\n"
         "from control_plane import serve_control_plane\n"
         "serve_control_plane()\n"
         "PY\n"

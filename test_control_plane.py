@@ -3,6 +3,8 @@ import asyncio
 import base64
 import json
 import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -38,6 +40,8 @@ def test_bootstrap_contains_one_off_netbird_key_but_no_vultr_credentials():
     assert "ConditionPathExists=/home/cerberus/.config/cerberus/control.env" in script
     assert "PathExists=/home/cerberus/.config/cerberus/control.env" in script
     assert "serve_control_plane()" in script and "netbirdIp" in script
+    launcher = script.split("cat > /usr/local/bin/cerberus-control-start <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    assert launcher.index('sys.path.insert(0, "/opt/cerberus")') < launcher.index("from control_plane import serve_control_plane")
     assert subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True).returncode == 0
     ast.parse(script.split("cat > /usr/local/bin/cerberus-control-start <<'PY'\n", 1)[1].split("\nPY\n", 1)[0])
     ast.parse(script.split("proof=$(python3 -c '", 1)[1].split("')\n", 1)[0])
@@ -106,6 +110,17 @@ def test_control_listener_refuses_public_or_unverified_vpc_address(vpc_ip, vpc_s
     status = {"netbirdIp": "100.124.55.15/16", "management": {"connected": True}, "signal": {"connected": True}}
     with pytest.raises(ValueError, match="VPC"):
         control_listener_addresses(status, vpc_ip, vpc_subnet)
+
+
+def test_control_launcher_resolves_repo_when_executed_outside_project(tmp_path):
+    script = control_plane_user_data(CALLBACK_URL, "r" * 32, "C" * 36, REPO_SHA)
+    launcher = script.split("cat > /usr/local/bin/cerberus-control-start <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    source = launcher.replace('"/opt/cerberus"', repr(str(Path(__file__).parent)))
+    source = source.replace("serve_control_plane()", "print('control-plane-module-loaded')")
+    path = tmp_path / "control-start.py"
+    path.write_text(source)
+    result = subprocess.run([sys.executable, str(path)], cwd=tmp_path, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0 and result.stdout.strip() == "control-plane-module-loaded"
 
 
 @pytest.mark.parametrize("callback,repo_sha", [
