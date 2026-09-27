@@ -278,8 +278,17 @@ def _diff(original: str, new_source: str, sink_file: str) -> str:
     )
 
 
-def _try_patch(finding, source_dir, entrypoint, new_source, canaries, benign, timeout):
-    """Apply one candidate patch to a disposable copy and run the re-exploit + functional checks."""
+def _try_patch(finding, source_dir, entrypoint, new_source, canaries, benign, timeout, launcher=None):
+    """Apply one candidate patch to a disposable copy and run the re-exploit + functional checks.
+
+    ``launcher`` is an optional hosting seam for the re-exploit: a callable
+    taking ``(copied_target_dir, entrypoint)`` and returning
+    ``(base_url, stop)``. With the default (None) the copy is booted locally on
+    a free port (``free_port`` + ``_start_target`` + ``_stop``) exactly as
+    before. A returned ``stop`` is ALWAYS called, even when a later check
+    raises; if the launcher itself raised before returning, there is nothing to
+    stop and its exception propagates.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         dst = Path(tmp) / "target"
         shutil.copytree(
@@ -288,10 +297,14 @@ def _try_patch(finding, source_dir, entrypoint, new_source, canaries, benign, ti
             ignore=shutil.ignore_patterns("__pycache__", "*.db", "docs", "app_secret.txt", ".pytest_cache", "tests"),
         )
         (dst / finding.sink_file).write_text(new_source)
-        port = free_port()
-        proc = _start_target(dst, entrypoint, port)
-        try:
+        if launcher is None:
+            port = free_port()
+            proc = _start_target(dst, entrypoint, port)
             base = f"http://127.0.0.1:{port}"
+            stop = lambda: _stop(proc)  # noqa: E731
+        else:
+            base, stop = launcher(dst, entrypoint)
+        try:
             _wait_health(base, timeout)
             blocked, evidence = _reexploit(finding, base, canaries, timeout)
             func_ok = _functional_ok(finding, base, canaries, timeout, benign)
@@ -300,8 +313,67 @@ def _try_patch(finding, source_dir, entrypoint, new_source, canaries, benign, ti
             # simply not accepted; the caller falls back to the next candidate.
             blocked, evidence, func_ok = False, f"patched app did not run: {exc}", False
         finally:
-            _stop(proc)
+            stop()
     return blocked, evidence, func_ok
+
+
+def _apply_validation_gate(
+    result: RemediationResult,
+    finding: Finding,
+    sink_symbol: str,
+    new_source: str,
+    blocked: bool,
+    func_ok: bool,
+    writer_client: InferenceClient | None,
+) -> None:
+    """Independent certification gate for one accepted patch (single or batch).
+
+    Fills in ``validated`` / ``validation_source`` / ``validation_notes`` (and
+    ``independent_review`` for model-written patches) on ``result``. A
+    deterministic patch is certified by the static AST check -- the writer is
+    code, so the checker is already independent. A model-written patch is NOT
+    required to match the deterministic static-template check (it only
+    recognizes the seeded shapes and would reject valid patches for arbitrary
+    code, the whole point of the model patcher); its gate is instead: re-exploit
+    blocked + functional preserved + an INDEPENDENT model reviewer (a different
+    model than the writer, ``writer_client`` providing the ``avoid_model`` hint)
+    agreeing the class is closed and the fix does not over-block. The re-exploit
+    stays the only fully independent judge either way.
+    """
+    static_ok, static_note = _validate(finding, sink_symbol, new_source)
+    if result.patch_source == "vultr-inference":
+        if not (blocked and func_ok):
+            result.validated = False
+            result.validation_source = "not certified — patch did not close the class or broke functionality"
+            result.validation_notes = static_note
+        else:
+            review = model_review(finding, sink_symbol, new_source, avoid_model=getattr(writer_client, "_model", None))
+            result.independent_review = review
+            if review is not None:
+                # An explicit independent verdict decides -- a dissent (not closed,
+                # or over-blocks) blocks certification even if static analysis is
+                # happy, so the reviewer is never overruled.
+                result.validated = review["closed"] and not review["over_blocks"]
+                result.validation_source = "re-exploit + independent " + review["model"]
+                note = "reviewer: " + review["reason"]
+                result.validation_notes = (static_note + "; " + note) if static_ok else note
+            elif static_ok:
+                # No reviewer available (transient), but the static analyzer -- which
+                # is independent of the model writer -- recognizes the fix. That is a
+                # valid independent certification of a recognized shape.
+                result.validated = True
+                result.validation_source = "static-validator (independent of the model writer)"
+                result.validation_notes = static_note + "; independent model review unavailable, fell back to static analysis"
+            else:
+                result.validated = False
+                result.validation_source = "independent review UNAVAILABLE"
+                result.validation_notes = "no independent reviewer and static analysis does not recognize the fix — not certified"
+    else:
+        # Deterministic patch: the writer is code, and the static AST check plus
+        # the re-exploit are already independent of any model.
+        result.validated = static_ok
+        result.validation_notes = static_note
+        result.validation_source = "static-validator (offline)"
 
 
 def remediate(finding: Finding, source_dir: str, *, timeout: float = 12.0) -> RemediationResult:
@@ -376,49 +448,151 @@ def remediate(finding: Finding, source_dir: str, *, timeout: float = 12.0) -> Re
     result.functional_ok = func_ok
     result.regression_test = _regression_test(finding, canaries)
 
-    static_ok, static_note = _validate(finding, sink_symbol, patch.new_source)
-    if label == "vultr-inference":
-        # A model wrote this patch. Do NOT require the deterministic static-template
-        # check -- it only recognizes the seeded shapes, so it would reject valid
-        # patches for arbitrary code (the whole point of the model patcher). The
-        # gate is instead: re-exploit blocked + functional preserved + an
-        # INDEPENDENT model reviewer (a different model than the writer) agreeing
-        # the class is closed and the fix does not over-block. The re-exploit stays
-        # the only fully independent judge.
-        if not (blocked and func_ok):
-            result.validated = False
-            result.validation_source = "not certified — patch did not close the class or broke functionality"
-            result.validation_notes = static_note
-        else:
-            review = model_review(finding, sink_symbol, patch.new_source, avoid_model=getattr(client, "_model", None))
-            result.independent_review = review
-            if review is not None:
-                # An explicit independent verdict decides -- a dissent (not closed,
-                # or over-blocks) blocks certification even if static analysis is
-                # happy, so the reviewer is never overruled.
-                result.validated = review["closed"] and not review["over_blocks"]
-                result.validation_source = "re-exploit + independent " + review["model"]
-                note = "reviewer: " + review["reason"]
-                result.validation_notes = (static_note + "; " + note) if static_ok else note
-            elif static_ok:
-                # No reviewer available (transient), but the static analyzer -- which
-                # is independent of the model writer -- recognizes the fix. That is a
-                # valid independent certification of a recognized shape.
-                result.validated = True
-                result.validation_source = "static-validator (independent of the model writer)"
-                result.validation_notes = static_note + "; independent model review unavailable, fell back to static analysis"
-            else:
-                result.validated = False
-                result.validation_source = "independent review UNAVAILABLE"
-                result.validation_notes = "no independent reviewer and static analysis does not recognize the fix — not certified"
-    else:
-        # Deterministic patch: the writer is code, and the static AST check plus
-        # the re-exploit are already independent of any model.
-        result.validated = static_ok
-        result.validation_notes = static_note
-        result.validation_source = "static-validator (offline)"
-
+    _apply_validation_gate(result, finding, sink_symbol, patch.new_source, blocked, func_ok, client)
     return result
+
+
+def remediate_batch(
+    findings: list[Finding],
+    source_dir: str,
+    *,
+    timeout: float = 12.0,
+    launcher=None,
+) -> tuple[list[RemediationResult], bool]:
+    """Patch every finding into ONE shared cumulative copy, then prove them all in a single hosting.
+
+    Where remediate() patches one finding on its own disposable copy, this is
+    the launch-report shape: findings are patched in list order onto a single
+    evolving copy -- each finding's patch builds on the source already carrying
+    the previous findings' fixes -- and the fully patched app is hosted EXACTLY
+    ONCE for every per-finding proof (re-exploit, functional check, static /
+    independent review). A finding whose patch cannot be produced (no
+    deterministic patcher matched and the model gave nothing) stays
+    ``patched=False`` with a note and contributes no patch; it is still honestly
+    re-exploited against the shared app, where it will report as still open.
+    The original source dir is never mutated.
+
+    ``launcher`` is the hosting seam: ``callable(copied_target_dir, entrypoint)
+    -> (base_url, stop)``. With the default (None) the cumulative copy is booted
+    locally on a free port (``_start_target``). The returned ``stop`` is always
+    called, even on failure; if the launcher itself raises, nothing exists to
+    stop. On any launch/boot failure every finding keeps its patch but gets
+    ``reexploit_blocked=False`` with the launch failure as evidence, so nothing
+    is certified off an app that never ran.
+
+    Returns ``(results, functional)``: one RemediationResult per finding, in the
+    findings' order, and an overall flag that is True iff the shared app booted
+    healthy AND every finding's legitimate request still succeeded against it.
+    """
+    results = [
+        RemediationResult(finding_id=f.id, vuln_class=f.vuln_class, endpoint=f.endpoint, param=f.param)
+        for f in findings
+    ]
+    if not findings:
+        return results, True
+    manifest = load_manifest(source_dir)
+    canaries = canaries_for(manifest)
+    entrypoint = (manifest or {}).get("entrypoint", "app.py")
+    benign_by_class = ((manifest or {}).get("benign") or {})  # per-target overrides; missing -> class default
+
+    with tempfile.TemporaryDirectory() as tmp:
+        dst = Path(tmp) / "target"
+        shutil.copytree(
+            source_dir,
+            dst,
+            ignore=shutil.ignore_patterns("__pycache__", "*.db", "docs", "app_secret.txt", ".pytest_cache", "tests"),
+        )
+
+        # Phase 1 -- one patch per finding, in findings-list order, each computed
+        # against (and written into) the SHARED copy so later findings patch on
+        # top of earlier fixes. Each finding's diff is snapshotted against the
+        # cumulative text as it stood when THAT finding was patched.
+        symbols: dict[int, str] = {}  # finding index -> sink symbol (when known)
+        patched_info: dict[int, tuple[str, str, InferenceClient | None]] = {}  # idx -> (symbol, new_source, writer client)
+        for idx, (finding, result) in enumerate(zip(findings, results)):
+            sink_symbol = _sink_symbol(finding)
+            if not sink_symbol:
+                result.validation_notes = "could not identify the sink function from the finding"
+                continue
+            symbols[idx] = sink_symbol
+            sink_path = dst / finding.sink_file
+            try:
+                original = sink_path.read_text()
+            except OSError:
+                result.validation_notes = f"could not read sink file {finding.sink_file}"
+                continue
+            patch = patch_source(finding.vuln_class, sink_symbol, original)
+            writer_client = None
+            if patch is None:
+                writer_client = InferenceClient()
+                patch = model_write_patch(finding, sink_symbol, original, writer_client)
+            if patch is None:
+                result.validation_notes = "no patch produced: no deterministic patcher matched and no model patch was available"
+                continue
+            result.patched = True
+            result.patch_source = "vultr-inference" if writer_client is not None else "deterministic-template"
+            result.patch_description = patch.description
+            result.patch_diff = _diff(original, patch.new_source, finding.sink_file)
+            result.regression_test = _regression_test(finding, canaries)
+            sink_path.write_text(patch.new_source)
+            patched_info[idx] = (sink_symbol, patch.new_source, writer_client)
+
+        # Phase 2 -- host the cumulatively patched shared app ONCE and run every
+        # finding's proof against it.
+        try:
+            if launcher is None:
+                port = free_port()
+                proc = _start_target(dst, entrypoint, port)
+                base = f"http://127.0.0.1:{port}"
+                stop = lambda: _stop(proc)  # noqa: E731
+            else:
+                base, stop = launcher(dst, entrypoint)
+        except Exception as exc:
+            # The host never came up and nothing was returned to stop: every
+            # finding keeps its patch but cannot be proven closed.
+            for result in results:
+                result.reexploit_blocked = False
+                result.reexploit_evidence = f"shared launch failed: {exc}"
+            return results, False
+
+        functional = False
+        try:
+            _wait_health(base, timeout)
+            functional = True
+            for idx, (finding, result) in enumerate(zip(findings, results)):
+                try:
+                    blocked, evidence = _reexploit(finding, base, canaries, timeout)
+                    func_ok = _functional_ok(finding, base, canaries, timeout, benign_by_class.get(finding.vuln_class))
+                    result.reexploit_blocked = blocked
+                    result.reexploit_evidence = evidence
+                    result.functional_ok = func_ok
+                    functional = functional and func_ok
+                    if result.patched:
+                        sink_symbol, new_source, writer_client = patched_info[idx]
+                        _apply_validation_gate(result, finding, sink_symbol, new_source, blocked, func_ok, writer_client)
+                    elif idx in symbols:
+                        # No patch to certify, but record the honest static verdict
+                        # that the class is still open in the shared app.
+                        _, static_note = _validate(finding, symbols[idx], (dst / finding.sink_file).read_text())
+                        result.validation_notes = f"{result.validation_notes}; shared app still open: {static_note}"
+                except Exception as exc:
+                    # A transport-level oddity during one finding's proof fails
+                    # THAT finding closed, never silently certified.
+                    result.reexploit_blocked = False
+                    result.reexploit_evidence = f"proof step errored: {exc}"
+                    result.functional_ok = False
+                    functional = False
+        except Exception as exc:
+            # Boot failure (or any hosting crash): no finding can be certified
+            # off an app that did not run -- each keeps its patch but stays
+            # blocked=False with the launch failure as evidence.
+            functional = False
+            for result in results:
+                result.reexploit_blocked = False
+                result.reexploit_evidence = f"shared launch failed: {exc}"
+        finally:
+            stop()
+        return results, functional
 
 
 def main(argv: list[str] | None = None) -> int:
