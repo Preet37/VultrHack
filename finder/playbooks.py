@@ -137,7 +137,12 @@ def confirm_path_traversal(base_url: str, endpoint: str, input_source: str, time
     try:
         with httpx.Client(timeout=timeout, follow_redirects=True) as client:
             for p in payloads:
-                req = client.build_request("GET", url, params={param: p})
+                # Build the query manually. httpx's params= percent-encodes the
+                # '%' in encoded-slash payloads ('..%2f...' -> '..%252f...'), so
+                # the app would receive the literal '..%2f...' and the encoded
+                # evasion would never actually be tested. A raw query string puts
+                # '%2f' on the wire intact; the server decodes it to '/' itself.
+                req = client.build_request("GET", f"{url}?{quote(param)}={p}")
                 resp = client.send(req)
                 fired_req = str(req.url)
                 attempts.append((f"GET {fired_req}", resp.text))

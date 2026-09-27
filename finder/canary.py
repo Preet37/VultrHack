@@ -10,13 +10,6 @@ canary out, which drives false positives to zero by construction.
 from __future__ import annotations
 
 
-def observed(canary: str, *outputs: str) -> bool:
-    """True iff the canary string appears in any observable output."""
-    if not canary:
-        return False
-    return any(canary in (text or "") for text in outputs)
-
-
 def first_match(canaries: list[str], *outputs: str) -> str | None:
     """Return the first canary observed leaving the box, or None."""
     for canary in canaries:
