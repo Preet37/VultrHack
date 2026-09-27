@@ -109,14 +109,21 @@ class FinderReport:
     triage_source: str
 
     def to_dict(self) -> dict:
+        classes = ", ".join(self.coverage.classes_tested) or "none"
+        if self.findings:
+            summary = (
+                f"{len(self.findings)} confirmed finding(s) in classes tested "
+                f"({classes}); each carries a working exploit and canary proof."
+            )
+        else:
+            summary = (
+                f"0 confirmed findings in classes tested ({classes}); "
+                "no exploit found does not mean the code is safe."
+            )
         return {
             "target": self.target,
             "triage_source": self.triage_source,
             "findings": [f.to_dict() for f in self.findings],
             "coverage": self.coverage.to_dict(),
-            "summary": (
-                f"{len(self.findings)} confirmed finding(s) in classes tested "
-                f"({', '.join(self.coverage.classes_tested) or 'none'}); "
-                "no exploit found does not mean the code is safe."
-            ),
+            "summary": summary,
         }
