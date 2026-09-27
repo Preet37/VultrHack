@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cerberus — look &amp; feel</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800;900&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&family=Caveat:wght@600&display=swap">
+<style>
+  :root{
+    --paper:#e7ebe4;--surface:#f1f4ee;--card:#fbfcf9;--sink:#e0e5dc;
+    --ink:#14201a;--ink2:#556258;--faint:#8a968c;--line:#d6ddd3;--line2:#c6cdc2;
+    --emerald:#12854a;--lime:#2fb866;--emerald-soft:#e4f1e8;
+    --coral:#e14b54;--coral-soft:#fbe7e7;--amber:#b7791f;
+    --graphite:#161a20;--g-ink:#c9d2c9;--g-dim:#6b7568;
+    --disp:"Archivo",system-ui,sans-serif;--sans:"Inter",system-ui,sans-serif;--mono:"JetBrains Mono",ui-monospace,Menlo,monospace;--hand:"Caveat",cursive;
+    --sh:0 12px 34px -16px rgba(20,45,30,.28);--sh2:0 4px 14px -8px rgba(20,45,30,.22);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:
+      radial-gradient(1100px 600px at 88% -10%,#dfeee3 0,transparent 55%),
+      radial-gradient(900px 500px at 4% 4%,#e9efe6 0,transparent 50%),
+      var(--paper);
+    color:var(--ink);font-family:var(--sans);-webkit-font-smoothing:antialiased;padding:26px 30px 40px}
+  .wrap{max-width:1360px;margin:0 auto}
+  .top{display:flex;align-items:center;gap:14px;margin-bottom:18px}
+  .brand{display:flex;align-items:center;gap:11px}
+  .logo{width:34px;height:34px;border-radius:9px;background:conic-gradient(from 210deg,#0e7a44,#2fb866,#0e7a44);box-shadow:var(--sh2)}
+  .brand .nm{font-family:var(--disp);font-weight:800;font-size:19px;letter-spacing:-.3px}
+  .top .lab{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--ink2);background:var(--card);border:1px solid var(--line);border-radius:999px;padding:5px 13px;box-shadow:var(--sh2)}
+
+  /* palette strip */
+  .sw{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px}
+  .chip{border-radius:12px;padding:12px 14px;min-width:120px;box-shadow:var(--sh2);border:1px solid var(--line)}
+  .chip .h{font-family:var(--mono);font-size:10px;letter-spacing:.02em}
+  .chip .v{font-family:var(--mono);font-size:10px;opacity:.7}
+  .grid{display:grid;grid-template-columns:1.05fr 1.35fr;gap:18px}
+  @media(max-width:900px){.grid{grid-template-columns:1fr}}
+
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:18px;box-shadow:var(--sh);overflow:hidden}
+  .plabel{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);padding:14px 18px 0}
+
+  /* ---- launcher mini ---- */
+  .lchrome{display:flex;align-items:center;gap:8px;padding:11px 14px;border-bottom:1px solid var(--line);background:var(--surface)}
+  .lchrome i{width:11px;height:11px;border-radius:50%}
+  .lchrome i:nth-child(1){background:#f3766f}.lchrome i:nth-child(2){background:#f2b737}.lchrome i:nth-child(3){background:#4fb865}
+  .lchrome .u{margin:0 auto;font-family:var(--mono);font-size:11px;color:var(--ink2);background:var(--card);border:1px solid var(--line);border-radius:7px;padding:4px 14px}
+  .lbody{padding:20px;position:relative;min-height:340px;background:
+      radial-gradient(600px 300px at 70% 120%,#e5efe6 0,transparent 60%)}
+  .lhead{display:flex;align-items:center;gap:9px;margin-bottom:6px}
+  .lhead .nm{font-family:var(--disp);font-weight:800;font-size:16px}
+  .lhead .a{font-family:var(--mono);font-size:10.5px;color:var(--emerald);background:var(--emerald-soft);border:1px solid #bfe3ca;border-radius:999px;padding:3px 9px}
+  .sticky{position:absolute;background:#f4ead0;color:#5c4c21;font-family:var(--hand);font-size:19px;line-height:1.1;padding:12px 13px;border-radius:3px;box-shadow:var(--sh2);width:150px}
+  .sticky b{font-family:var(--disp);font-weight:800;font-size:13px;display:block}
+  .s1{top:74px;right:40px;transform:rotate(4deg)}
+  .s2{top:150px;right:150px;transform:rotate(-4deg);width:135px}
+  .rcards{position:absolute;left:20px;right:20px;bottom:70px;display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .rc{background:var(--card);border:1px solid var(--line);border-radius:13px;padding:12px;box-shadow:var(--sh2)}
+  .rc.on{border-color:var(--lime);box-shadow:0 0 0 1px var(--lime),var(--sh2)}
+  .rc .ic{width:26px;height:26px;border-radius:8px;background:var(--sink);display:grid;place-items:center;font-size:14px;margin-bottom:8px}
+  .rc .t{font-family:var(--disp);font-weight:700;font-size:13px}.rc .d{font-family:var(--mono);font-size:10px;color:var(--faint);margin-top:2px}
+  .prompt{position:absolute;left:20px;right:20px;bottom:20px;display:flex;gap:8px;align-items:center;background:var(--card);border:1px solid var(--line2);border-radius:13px;padding:7px 7px 7px 15px;box-shadow:var(--sh2)}
+  .prompt .ph{flex:1;font-family:var(--mono);font-size:12px;color:var(--ink2)}
+  .det{width:38px;height:38px;border-radius:10px;background:linear-gradient(180deg,#2fb866,#0e7a44);color:#fff;display:grid;place-items:center;font-size:17px;box-shadow:0 8px 18px -6px rgba(18,133,74,.6)}
+
+  /* ---- instance: light app w/ dark terminal + diff + rail ---- */
+  .ihead{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line);background:var(--surface)}
+  .ihead .id{font-family:var(--mono);font-size:12px}.ihead .id b{color:var(--emerald)}
+  .pill{font-family:var(--mono);font-size:10px;color:var(--ink2);background:var(--card);border:1px solid var(--line);border-radius:999px;padding:4px 9px;display:inline-flex;gap:6px;align-items:center}
+  .pill i{width:6px;height:6px;border-radius:50%;background:var(--lime)}
+  .ihead .up{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--faint)}
+  .ibody{display:grid;grid-template-columns:1.5fr .9fr;gap:0}
+  /* nested container motif + terminal */
+  .stack{padding:14px}
+  .nested{border:1.5px dashed var(--line2);border-radius:14px;padding:10px;background:var(--surface);position:relative}
+  .nested .tag{position:absolute;top:-9px;left:14px;background:var(--card);border:1px solid var(--line);border-radius:999px;font-family:var(--mono);font-size:9px;color:var(--ink2);padding:2px 9px}
+  .term{background:var(--graphite);border-radius:11px;overflow:hidden;box-shadow:inset 0 0 0 1px #23272e, 0 10px 24px -14px #000}
+  .tbar{display:flex;align-items:center;gap:7px;padding:7px 11px;border-bottom:1px solid #23272e;font-family:var(--mono);font-size:10px;color:var(--g-dim)}
+  .tbar i{width:7px;height:7px;border-radius:50%;background:#3a4048}.tbar i.g{background:#4fb865}
+  .tlog{padding:10px 12px;font-family:var(--mono);font-size:11px;line-height:1.75}
+  .tl{display:flex;gap:9px}.tl .ts{color:#4b5350}.tl .tg{width:46px;text-transform:uppercase;font-size:9px}
+  .tl.info .tg{color:#6ea8ff}.tl.ok .tg{color:#54c877}.tl.warn .tg{color:#e0a83a}.tl.err .tg{color:#f2757e}
+  .tl .tx{color:var(--g-ink)}.tl.ok .tx{color:#a7e0bb}.tl.err .tx{color:#f5a6ad}
+  .tl.breach{background:rgba(225,75,84,.13);margin:1px -12px;padding:1px 12px;border-radius:4px}.tl.breach .tg,.tl.breach .tx{color:#f79aa1;font-weight:700}
+  .diff{margin-top:12px;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--card);box-shadow:var(--sh2)}
+  .dh{display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid var(--line)}
+  .dh .cl{font-family:var(--disp);font-weight:700;font-size:12.5px}.dh .ep{font-family:var(--mono);font-size:10px;color:var(--faint)}
+  .dh .ok{margin-left:auto;font-family:var(--mono);font-size:9px;color:var(--emerald);background:var(--emerald-soft);border:1px solid #bfe3ca;border-radius:999px;padding:3px 8px}
+  .dpre{font-family:var(--mono);font-size:10.5px;line-height:1.6;padding:8px 0}
+  .dr{display:flex;padding:0 12px}.dr .g{width:22px;color:#b3bdb2;text-align:right;padding-right:8px}
+  .dr.rm{background:var(--coral-soft)}.dr.rm .t{color:#b5323b}.dr.ad{background:var(--emerald-soft)}.dr.ad .t{color:#0f7a43}.dr .t{color:#3f4a42}
+  .why{padding:9px 12px;border-top:1px solid var(--line);background:var(--emerald-soft)}
+  .why .h{font-family:var(--disp);font-weight:700;font-size:10.5px;color:var(--emerald);margin-bottom:2px}
+  .why .t{font-size:11.5px;color:#26463a;line-height:1.45}
+  /* rail */
+  .rail{border-left:1px solid var(--line);background:var(--surface);padding:14px 14px}
+  .rl{font-family:var(--mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint);margin-bottom:9px}
+  .ag{display:flex;align-items:center;gap:9px;background:var(--card);border:1px solid var(--line);border-radius:11px;padding:8px 10px;margin-bottom:7px;box-shadow:var(--sh2)}
+  .ag .av{width:24px;height:24px;border-radius:7px;display:grid;place-items:center;font-family:var(--mono);font-weight:700;font-size:10px;color:#fff;background:var(--ac)}
+  .ag .nm{font-family:var(--disp);font-weight:700;font-size:12px}.ag .st{font-family:var(--mono);font-size:9.5px;color:var(--ink2)}
+  .ag .ck{margin-left:auto;color:var(--emerald);font-size:12px}
+  .ag.work .ck{color:var(--faint)}
+  .vit{margin-top:12px;border-top:1px solid var(--line);padding-top:10px}
+  .vr{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10.5px;color:var(--ink2);padding:3px 0}.vr b{color:var(--ink)}.vr b.r{color:var(--coral)}
+  .blast{text-align:center;margin-top:6px}.blast .n{font-family:var(--disp);font-weight:900;font-size:24px;color:var(--emerald)}.blast .c{font-family:var(--mono);font-size:8.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint)}
+  .note{margin-top:16px;font-family:var(--mono);font-size:11px;color:var(--ink2);text-align:center}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div class="brand"><span class="logo"></span><span class="nm">Cerberus</span></div>
+    <span class="lab">look &amp; feel — light, not white</span>
+  </div>
+
+  <div class="sw">
+    <div class="chip" style="background:#e7ebe4"><div class="h">paper</div><div class="v">#E7EBE4</div></div>
+    <div class="chip" style="background:#f1f4ee"><div class="h">surface</div><div class="v">#F1F4EE</div></div>
+    <div class="chip" style="background:#fbfcf9"><div class="h">card</div><div class="v">#FBFCF9</div></div>
+    <div class="chip" style="background:#12854a;color:#eafff1;border-color:#0e6e3d"><div class="h">emerald</div><div class="v">#12854A</div></div>
+    <div class="chip" style="background:#2fb866;color:#04240f;border-color:#28a259"><div class="h">lime</div><div class="v">#2FB866</div></div>
+    <div class="chip" style="background:#e14b54;color:#fff;border-color:#c93e46"><div class="h">coral</div><div class="v">#E14B54</div></div>
+    <div class="chip" style="background:#161a20;color:#c9d2c9;border-color:#23272e"><div class="h">graphite / terminal</div><div class="v">#161A20</div></div>
+    <div class="chip" style="background:#14201a;color:#cdd6cd;border-color:#0e1712"><div class="h">ink</div><div class="v">#14201A</div></div>
+  </div>
+
+  <div class="grid">
+    <!-- launcher -->
+    <div class="panel">
+      <div class="lchrome"><i></i><i></i><i></i><span class="u">▲ cerberus · localhost</span></div>
+      <div class="lbody">
+        <div class="lhead"><span class="nm">Cerberus</span><span class="a">6 agents standing by</span></div>
+        <div class="sticky s1"><b>No finding without a proof</b>the canary is the judge</div>
+        <div class="sticky s2"><b>Blast radius zero</b>the box dies, you keep the fix</div>
+        <div class="rcards">
+          <div class="rc on"><div class="ic">🧪</div><div class="t">seeded_flask</div><div class="d">5 planted vulns</div></div>
+          <div class="rc"><div class="ic">📦</div><div class="t">snipstash</div><div class="d">snippet API</div></div>
+        </div>
+        <div class="prompt"><span class="ph">paste a repo or a download to detonate…</span><span class="det">↑</span></div>
+      </div>
+    </div>
+
+    <!-- instance -->
+    <div class="panel">
+      <div class="ihead">
+        <span class="id">instance <b>cerberus-2e13f5bc</b></span>
+        <span class="pill"><i></i> gVisor runsc</span>
+        <span class="pill"><i></i> egress deny</span>
+        <span class="up">uptime 12.4s</span>
+      </div>
+      <div class="ibody">
+        <div class="stack">
+          <div class="nested">
+            <span class="tag">disposable gVisor container · inside the instance</span>
+            <div class="term">
+              <div class="tbar"><i></i><i></i><i class="g"></i><span style="margin-left:5px;color:#8b958a">root@cerberus:~/target#</span></div>
+              <div class="tlog">
+                <div class="tl info"><span class="ts">15:04:11</span><span class="tg">info</span><span class="tx">pip install -r requirements.txt … flask ok</span></div>
+                <div class="tl ok"><span class="ts">15:04:12</span><span class="tg">ok</span><span class="tx">target up · triage on deepseek-v4-flash-0731</span></div>
+                <div class="tl info"><span class="ts">15:04:13</span><span class="tg">info</span><span class="tx">exploit[sqli]: firing 'id' at /product</span></div>
+                <div class="tl breach"><span class="ts">15:04:13</span><span class="tg">breach</span><span class="tx">canary CANARY… LEFT THE BOX — sqli confirmed</span></div>
+                <div class="tl err"><span class="ts">15:04:19</span><span class="tg">err</span><span class="tx">SIGKILL → container · egress severed · 0 bytes out</span></div>
+                <div class="tl ok"><span class="ts">15:04:19</span><span class="tg">ok</span><span class="tx">instance destroyed → 404 · receipt sealed</span></div>
+              </div>
+            </div>
+          </div>
+          <div class="diff">
+            <div class="dh"><span class="cl">sqli</span><span class="ep">/product · re-exploit blocked</span><span class="ok">certified</span></div>
+            <div class="dpre">
+              <div class="dr"><span class="g"></span><span class="t">@@ parameterized query @@</span></div>
+              <div class="dr rm"><span class="g">4</span><span class="t">- query = "SELECT … WHERE id = " + pid</span></div>
+              <div class="dr ad"><span class="g">5</span><span class="t">+ query = "SELECT … WHERE id = ?"; db.execute(query,(pid,))</span></div>
+            </div>
+            <div class="why"><div class="h">why it holds</div><div class="t">Input is bound as a parameter, so it can never change the SQL structure — injection is impossible by construction.</div></div>
+          </div>
+        </div>
+        <div class="rail">
+          <div class="rl">agents · in parallel</div>
+          <div class="ag" style="--ac:#5b8cff"><span class="av">RC</span><div><div class="nm">Recon</div><div class="st">5 classes</div></div><span class="ck">✓</span></div>
+          <div class="ag" style="--ac:#12a58a"><span class="av">TR</span><div><div class="nm">Triage</div><div class="st">5 candidates</div></div><span class="ck">✓</span></div>
+          <div class="ag work" style="--ac:#e14b54"><span class="av">EX</span><div><div class="nm">Exploit</div><div class="st">5 proven</div></div><span class="ck">✓</span></div>
+          <div class="ag work" style="--ac:#b7791f"><span class="av">PA</span><div><div class="nm">Patch</div><div class="st">5 fixed</div></div><span class="ck">✓</span></div>
+          <div class="vit">
+            <div class="vr"><span>confirmed</span><b>5</b></div>
+            <div class="vr"><span>certified</span><b>5 / 5</b></div>
+            <div class="vr"><span>instance</span><b class="r">destroyed · 404</b></div>
+            <div class="blast"><div class="n">0 B</div><div class="c">left the box</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="note">light tinted paper · soft-shadow depth · one warm graphite terminal for the “VM” energy · deep emerald accent — not white, not black</div>
+</div>
+</body>
+</html>

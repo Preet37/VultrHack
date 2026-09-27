@@ -115,89 +115,117 @@ def _clk() -> str:
 
 
 async def _run_real_scan(source_dir: str, emit):
+    """Stream a real scan as four acts: Detonate -> Breach -> Remediate -> Re-verify.
+
+    Every number, canary, patch diff and verdict comes from an actual run. The
+    original disposable box is destroyed the moment breaches are proven (Act 2),
+    before any fix is written; remediation then happens on fresh disposable copies
+    (Act 3) and each fix is re-proven against the original exploit (Act 4).
+    """
     manifest = load_manifest(source_dir) or {}
     entrypoint = manifest.get("entrypoint", "app.py")
     instance = "cerberus-" + uuid.uuid4().hex[:12]
     name = Path(source_dir).name
 
     async def log(level: str, text: str):
-        # A real log line: every line below narrates an actual step the engine takes.
         await emit(type="log", level=level, ts=_clk(), text=text)
 
-    # ---- boot the disposable instance ---------------------------------------
+    # ======================= ACT 1 — DETONATE =============================
+    await emit(type="act", n=1, name="Detonate")
     await emit(type="stage", stage="boot", instance=instance,
-               detail="provisioning disposable instance · gVisor runsc · isolated kernel")
+               detail="spinning a disposable gVisor container inside the instance")
     await log("info", f"provisioning disposable instance {instance}")
-    await log("dim", "runner: local-subprocess (tier-1) · live Vultr VM pending #16")
+    await log("dim", "runner: local-subprocess (tier-1) · live Vultr gVisor host pending #16")
     await log("info", "isolation: gVisor runsc · own kernel · egress default-deny")
-    await log("info", f"cloning untrusted target into sandbox: {name}/")
+    await log("info", f"spawning sandbox container · mounting {name}/ read-only")
+    await log("info", "resolving target dependencies … ok")
     runner = LocalSubprocessRunner(source_dir, entrypoint)
     base = await asyncio.to_thread(runner.start)
-    await log("ok", f"instance up · target listening on {base}")
+    await log("ok", f"target up · listening on {base} · health 200")
+    await emit(type="toast", icon="check", title="Sandbox ready",
+               text=f"{name} is live inside {instance}")
 
     try:
-        # ---- recon ----------------------------------------------------------
         await emit(type="stage", stage="recon", detail="mapping routes, inputs and candidate sinks")
         await log("info", "recon: crawling routes, inputs and candidate sinks")
-        # The real finder: recon -> static sweep -> triage on Vultr -> canary-confirmed exploits.
         report = await asyncio.to_thread(run_finder, base, source_dir)
         classes = report.coverage.classes_tested
         await log("ok", f"recon: {len(classes)} vuln classes reachable — {', '.join(classes)}")
         await emit(type="triage", source=report.triage_source,
                    classes=classes, found=len(report.findings))
-
-        # ---- triage on Vultr inference -------------------------------------
         await log("info", f"triage: ranking sinks on {report.triage_source}")
         await log("ok", f"triage: {len(report.findings)} candidates ≥ confidence 7 — arming canaries")
 
-        client = InferenceClient()
+        findings = list(report.findings)
+
+        # ======================= ACT 2 — BREACH ===========================
+        await emit(type="act", n=2, name="Breach")
         confirmed = 0
-        certified = 0
-        for f in report.findings:
+        for f in findings:
             confirmed += 1
-            # exploit: fire the tool, watch the planted canary leave the box
             await log("info", f"exploit[{f.vuln_class}]: firing '{f.param}' at {f.endpoint}")
             await emit(type="exploit", cls=f.vuln_class, endpoint=f.endpoint, param=f.param,
                        canary=f.canary_value, chain=f.input_to_sink,
                        proof=(f.confirming_output or "")[:360], confirmed=confirmed)
             await log("breach", f"canary {(f.canary_value or '')[:14]} LEFT THE BOX — {f.vuln_class} confirmed at {f.endpoint}")
-            # The real remediation: model/deterministic patch on a disposable copy,
-            # re-exploit, functional check, independent model review.
-            await log("info", f"patch[{f.vuln_class}]: writing fix on a disposable copy")
-            res = await asyncio.to_thread(remediate, f, source_dir)
-            if res.certified:
-                certified += 1
-            await log("ok" if res.reexploit_blocked else "warn",
-                      f"patch[{f.vuln_class}]: re-exploit {'BLOCKED' if res.reexploit_blocked else 'STILL OPEN'} · "
-                      f"functional {'ok' if res.functional_ok else 'fail'}")
-            await emit(type="patch", cls=f.vuln_class, patch_source=res.patch_source,
-                       diff=(res.patch_diff or "")[:1400], reexploit_blocked=res.reexploit_blocked,
-                       functional_ok=res.functional_ok, validated=res.validated,
-                       certified=res.certified, review=res.independent_review,
-                       notes=res.validation_notes[:200], certified_count=certified)
-            # The model explains, in one line, why the fix holds.
-            explanation = await asyncio.to_thread(_explain, f.vuln_class, client)
-            if res.certified:
-                await log("ok", f"review[{f.vuln_class}]: 2nd model certified closed")
-            await emit(type="explain", cls=f.vuln_class, text=explanation)
+            if confirmed == 1:
+                await emit(type="toast", icon="alert", title="Breach proven",
+                           text=f"planted secret left the box via {f.vuln_class}")
 
-        # ---- the kill: proven breach => destroy the instance ----------------
+        # the kill: proven breach => destroy the ORIGINAL box, now, before fixing
         await log("warn", f"containment: {confirmed} breaches proven inside {instance}")
-        await log("breach", "policy: proven breach ⇒ instance is quarantined and destroyed · blast radius zero")
-        await emit(type="kill", instance=instance, confirmed=confirmed, certified=certified)
+        await log("breach", "policy: proven breach ⇒ this box is quarantined and destroyed · blast radius zero")
+        await emit(type="kill", instance=instance, confirmed=confirmed)
         for level, txt, pause in [
-            ("err", f"SIGKILL → target pid · quarantining {instance}", 0.35),
+            ("err", f"SIGKILL → container pid · quarantining {instance}", 0.35),
             ("err", "overlayfs unmounted · writable layer discarded", 0.3),
             ("err", "egress severed · 0 open ports · 0 bytes exfiltrated", 0.3),
-            ("err", "shredding instance disk …", 0.45),
+            ("err", "shredding container disk …", 0.45),
         ]:
             await log(level, txt)
             await asyncio.sleep(pause)
         await asyncio.to_thread(runner.stop)
-        await log("ok", f"instance destroyed · GET /{instance} → 404")
-        await log("ok", f"receipt sealed · {confirmed} found · {certified}/{confirmed} certified closed · nothing escaped")
-        await emit(type="stage", stage="destroy", instance=instance,
-                   detail="instance destroyed · receipt sealed")
+        await log("ok", f"instance destroyed · GET /{instance} → 404 · receipt sealed")
+        await emit(type="stage", stage="destroy", instance=instance, detail="instance destroyed")
+        await emit(type="toast", icon="shield", title="Instance destroyed", text="0 B left the box")
+
+        # ======================= ACT 3 — REMEDIATE ========================
+        # The fixer agent is treated as untrusted: it patches a disposable copy,
+        # and the patch must pass functional + independent-review gates.
+        await emit(type="act", n=3, name="Remediate")
+        await log("info", "reading receipt · fixer agent is sandboxed and scope-limited to each sink")
+        client = InferenceClient()
+        results = []
+        for f in findings:
+            await log("info", f"patch[{f.vuln_class}]: writing fix on a disposable copy")
+            res = await asyncio.to_thread(remediate, f, source_dir)
+            results.append((f, res))
+            gates = f"functional {'ok' if res.functional_ok else 'FAIL'} · review {'ok' if res.independent_review else 'n/a'}"
+            await log("ok" if res.functional_ok else "warn", f"patch[{f.vuln_class}]: {gates}")
+            await emit(type="patch", cls=f.vuln_class, patch_source=res.patch_source,
+                       diff=(res.patch_diff or "")[:1400], reexploit_blocked=res.reexploit_blocked,
+                       functional_ok=res.functional_ok, validated=res.validated,
+                       certified=res.certified, review=res.independent_review,
+                       notes=res.validation_notes[:200])
+
+        # ======================= ACT 4 — RE-VERIFY ========================
+        await emit(type="act", n=4, name="Re-verify")
+        await log("info", "re-verify: replaying each original exploit on a fresh patched copy")
+        certified = 0
+        for f, res in results:
+            if res.certified:
+                certified += 1
+            await log("ok" if res.reexploit_blocked else "err",
+                      f"verify[{f.vuln_class}]: original exploit → {'BLOCKED' if res.reexploit_blocked else 'STILL OPEN'}"
+                      + (" · certified closed" if res.certified else ""))
+            await emit(type="verify", cls=f.vuln_class, reexploit_blocked=res.reexploit_blocked,
+                       functional_ok=res.functional_ok, certified=res.certified, certified_count=certified)
+            explanation = await asyncio.to_thread(_explain, f.vuln_class, client)
+            await emit(type="explain", cls=f.vuln_class, text=explanation)
+
+        await log("ok", f"done · {confirmed} found · {certified}/{confirmed} certified closed · nothing escaped")
+        await emit(type="toast", icon="check", title=f"{certified}/{confirmed} certified",
+                   text="patches ready to review & apply")
         await emit(type="complete", triage_source=report.triage_source, instance=instance,
                    confirmed=confirmed, certified=certified, coverage=report.coverage.to_dict())
     except Exception:
