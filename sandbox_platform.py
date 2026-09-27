@@ -10,6 +10,7 @@ import subprocess
 import zlib
 
 INTERNAL_NETWORK = "cerberus-internal"
+VPC_INTERNAL_SUBNET = "172.29.240.0/24"
 HOST_BIND_OPTION = "com.docker.network.bridge.host_binding_ipv4"
 BRIDGE_NAME_OPTION = "com.docker.network.bridge.name"
 HOST_PROBE_CHAIN = "CERBERUS_OS_HOST"
@@ -21,7 +22,33 @@ IPV6_FORWARD_CHAIN = "CERBERUS_OS_FWD6"
 PROBE_PORT = 65000
 
 
-def build_opensandbox_config(docker_info, network, netbird_status=None):
+def validated_vpc_network(value):
+    try:
+        subnet = ipaddress.ip_network(value, strict=True)
+    except (TypeError, ValueError):
+        raise ValueError("VPC subnet must be a private IPv4 network") from None
+    private_ranges = (ipaddress.ip_network(block) for block in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+    if not isinstance(subnet, ipaddress.IPv4Network) or not any(subnet.subnet_of(block) for block in private_ranges):
+        raise ValueError("VPC subnet must be a private IPv4 network")
+    return subnet
+
+
+def verified_vpc_address(vpc_subnet, interfaces):
+    subnet = validated_vpc_network(vpc_subnet)
+    try:
+        addresses = [
+            ipaddress.IPv4Address(entry["local"])
+            for interface in interfaces if not interface["ifname"].startswith(("br-", "docker", "wt")) and interface["ifname"] != "lo"
+            for entry in interface["addr_info"] if entry["family"] == "inet" and ipaddress.IPv4Address(entry["local"]) in subnet
+        ]
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("VPC host address could not be verified") from None
+    if len(addresses) != 1 or addresses[0] in (subnet.network_address, subnet.broadcast_address):
+        raise ValueError("VPC host requires exactly one private address on the assigned subnet")
+    return str(addresses[0])
+
+
+def build_opensandbox_config(docker_info, network, netbird_status=None, vpc_address=None, vpc_subnet=None):
     if docker_info.get("DefaultRuntime") != "runsc" or "runsc" not in docker_info.get("Runtimes", {}):
         raise ValueError("Docker must have gVisor runsc installed as its default runtime")
     version = re.match(r"^(\d+)\.(\d+)(?:\.|$)", str(docker_info.get("ServerVersion", "")))
@@ -52,6 +79,18 @@ def build_opensandbox_config(docker_info, network, netbird_status=None):
             raise ValueError("NetBird must assign a valid overlay IPv4 address") from None
         if address not in ipaddress.ip_network("100.64.0.0/10"):
             raise ValueError("NetBird address must be inside the overlay range")
+        host = str(address)
+    if vpc_address is not None or vpc_subnet is not None:
+        if netbird_status is not None:
+            raise ValueError("VPC and NetBird endpoints cannot share a sandbox server")
+        subnet = validated_vpc_network(vpc_subnet)
+        try:
+            address = ipaddress.IPv4Address(vpc_address)
+            docker_subnet = ipaddress.ip_network(network["IPAM"]["Config"][0]["Subnet"])
+        except (KeyError, IndexError, TypeError, ValueError):
+            raise ValueError("VPC sandbox endpoint needs a verified bridge and address") from None
+        if address not in subnet or address in (subnet.network_address, subnet.broadcast_address) or subnet.overlaps(docker_subnet) or docker_subnet != ipaddress.ip_network(VPC_INTERNAL_SUBNET):
+            raise ValueError("VPC sandbox address or dedicated Docker subnet is invalid")
         host = str(address)
 
     api_key = secrets.token_urlsafe(32)
@@ -197,12 +236,16 @@ def recent_host_drop_log(bridge, gateway, since):
     return None
 
 
-async def check_private_endpoint(client, netbird_ip):
+async def check_private_endpoint(client, netbird_ip, vpc_subnet=None):
     try:
         address = ipaddress.ip_address(netbird_ip)
     except (TypeError, ValueError):
-        raise ValueError("NetBird endpoint requires an overlay IPv4 address") from None
-    if address not in ipaddress.ip_network("100.64.0.0/10"):
+        raise ValueError("VPC or NetBird endpoint requires a private IPv4 address") from None
+    if vpc_subnet is not None:
+        subnet = validated_vpc_network(vpc_subnet)
+        if not isinstance(address, ipaddress.IPv4Address) or address not in subnet or address in (subnet.network_address, subnet.broadcast_address):
+            raise ValueError("VPC endpoint is outside the approved private subnet")
+    elif address not in ipaddress.ip_network("100.64.0.0/10"):
         raise ValueError("NetBird endpoint requires an overlay IPv4 address")
     base = f"http://{address}:8080"
     health = await client.get(f"{base}/health", timeout=15)
@@ -235,25 +278,36 @@ def netbird_enrollment_user_data(setup_key, ssh_sftp=False):
     )
 
 
-def opensandbox_spike_user_data(netbird=False, report_stages=False):
+def opensandbox_spike_user_data(netbird=False, report_stages=False, vpc_subnet=None):
     def stage_line(name):
         return f"cerberus_report_stage {name}\n" if report_stages else f"CERBERUS_STAGE={name}\n"
 
+    if vpc_subnet is not None:
+        vpc_subnet = str(validated_vpc_network(vpc_subnet))
+    if netbird and vpc_subnet:
+        raise ValueError("VPC and NetBird sandbox modes cannot be combined")
+    functions = (
+        build_opensandbox_config, verified_probe_bridge, assert_closed_probe_port, install_host_drop_probe,
+        install_forward_drop_probe, install_ipv6_drop_probe, host_drop_packets, recent_host_drop_log,
+    )
+    if vpc_subnet:
+        functions = (validated_vpc_network, verified_vpc_address) + functions
     source = (
         "import ipaddress\nimport json\nimport re\nimport secrets\nimport socket\nimport subprocess\n"
-        f"INTERNAL_NETWORK = {INTERNAL_NETWORK!r}\nHOST_BIND_OPTION = {HOST_BIND_OPTION!r}\n"
+        f"INTERNAL_NETWORK = {INTERNAL_NETWORK!r}\nVPC_INTERNAL_SUBNET = {VPC_INTERNAL_SUBNET!r}\nHOST_BIND_OPTION = {HOST_BIND_OPTION!r}\n"
         f"BRIDGE_NAME_OPTION = {BRIDGE_NAME_OPTION!r}\nHOST_PROBE_CHAIN = {HOST_PROBE_CHAIN!r}\n"
         f"HOST_PROBE_LOG_PREFIX = {HOST_PROBE_LOG_PREFIX!r}\nFORWARD_PROBE_CHAIN = {FORWARD_PROBE_CHAIN!r}\n"
         f"FORWARD_PROBE_LOG_PREFIX = {FORWARD_PROBE_LOG_PREFIX!r}\nIPV6_HOST_CHAIN = {IPV6_HOST_CHAIN!r}\n"
         f"IPV6_FORWARD_CHAIN = {IPV6_FORWARD_CHAIN!r}\nPROBE_PORT = {PROBE_PORT!r}\n\n"
-        + "\n".join(inspect.getsource(function) for function in (
-            build_opensandbox_config, verified_probe_bridge, assert_closed_probe_port, install_host_drop_probe,
-            install_forward_drop_probe, install_ipv6_drop_probe, host_drop_packets, recent_host_drop_log,
-        ))
+        + "\n".join(inspect.getsource(function) for function in functions)
     )
     source = base64.b64encode(zlib.compress(source.encode(), level=9)).decode()
     status_line = "status = json.loads(subprocess.check_output(['netbird', 'status', '--json']))\n" if netbird else ""
-    proof_line = 'data["netbird_ip"] = tomllib.loads(Path("/root/.sandbox.toml").read_text())["server"]["host"]; ' if netbird else ""
+    if vpc_subnet:
+        status_line = "interfaces = json.loads(subprocess.check_output(['ip', '-j', 'addr']))\n" + f"vpc_ip = verified_vpc_address({vpc_subnet!r}, interfaces)\n"
+    config_args = ", netbird_status=status" if netbird else f", vpc_address=vpc_ip, vpc_subnet={vpc_subnet!r}" if vpc_subnet else ""
+    proof_line = 'data["netbird_ip"] = tomllib.loads(Path("/root/.sandbox.toml").read_text())["server"]["host"]; ' if netbird else 'data["vpc_ip"] = tomllib.loads(Path("/root/.sandbox.toml").read_text())["server"]["host"]; ' if vpc_subnet else ""
+    subnet_option = f"--subnet={VPC_INTERNAL_SUBNET} " if vpc_subnet else ""
     script = (
         f"printf '%s' {shlex.quote(source)} | base64 -d | python3 -c 'import sys,zlib; sys.stdout.buffer.write(zlib.decompress(sys.stdin.buffer.read()))' > /root/sandbox_platform.py\n"
         f"{stage_line('opensandbox_dependencies')}"
@@ -261,7 +315,7 @@ def opensandbox_spike_user_data(netbird=False, report_stages=False):
         "python3 -m venv /root/opensandbox-venv\n"
         "/root/opensandbox-venv/bin/pip install --disable-pip-version-check --no-input opensandbox-server==0.2.3 opensandbox==0.1.16\n"
         f"{stage_line('network_create')}"
-        "docker network create --internal --ipv6=false --driver bridge --opt com.docker.network.bridge.host_binding_ipv4=127.0.0.1 cerberus-internal\n"
+        f"docker network create --internal --ipv6=false --driver bridge {subnet_option}--opt com.docker.network.bridge.host_binding_ipv4=127.0.0.1 cerberus-internal\n"
         "docker pull opensandbox/execd:v1.0.22\n"
         f"{stage_line('opensandbox_config')}"
         "PYTHONPATH=/root python3 - <<'PY'\n"
@@ -269,11 +323,11 @@ def opensandbox_spike_user_data(netbird=False, report_stages=False):
         "import os\n"
         "import subprocess\n"
         "from pathlib import Path\n"
-        "from sandbox_platform import build_opensandbox_config\n"
+        f"from sandbox_platform import build_opensandbox_config{', verified_vpc_address' if vpc_subnet else ''}\n"
         "info = json.loads(subprocess.check_output(['docker', 'info', '--format', '{{json .}}']))\n"
         "network = json.loads(subprocess.check_output(['docker', 'network', 'inspect', 'cerberus-internal']))[0]\n"
         f"{status_line}"
-        f"config, key = build_opensandbox_config(info, network{', netbird_status=status' if netbird else ''})\n"
+        f"config, key = build_opensandbox_config(info, network{config_args})\n"
         "os.umask(0o077)\n"
         "Path('/root/.sandbox.toml').write_text(config)\n"
         "Path('/root/.sandbox.toml').chmod(0o600)\n"

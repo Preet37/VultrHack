@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from instance_lifecycle import ReadySignals, VultrInstances, docker_user_data, temporary_instance, verify_instance
-from main import BOOTSTRAP_STAGES, app, callback_app, ready_signals
+from main import BOOTSTRAP_STAGES, app, callback_app, control_server_app, ready_signals, vpc_callback_app
 
 
 def test_create_uses_cloud_init_without_vultr_keys():
@@ -179,6 +179,34 @@ def test_private_ready_callback_rejects_other_targets(url):
         docker_user_data(url, "ready-token", True, "A" * 36, private_callback=True)
 
 
+def test_vpc_callback_is_private_without_netbird_key_or_public_api():
+    url = "http://10.52.0.2:8001/internal/ready"
+    script = docker_user_data(url, "R" * 36, opensandbox_spike=True, vpc_callback=True, vpc_subnet="10.52.0.0/24")
+    assert url in script
+    assert "http://10.52.0.2:8001/internal/stage" in script
+    assert "http://10.52.0.2:8001/internal/failed" in script
+    assert "netbird up" not in script
+    assert "--subnet=172.29.240.0/24" in script
+    assert "CERBERUS_STAGE=docker_install" in script
+    assert subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True).returncode == 0
+    with pytest.raises(ValueError, match="VPC"):
+        docker_user_data(url, "R" * 36, True, netbird_setup_key="A" * 36, vpc_callback=True, vpc_subnet="10.52.0.0/24")
+
+
+@pytest.mark.parametrize("url,subnet", [
+    ("http://192.0.2.1:8001/internal/ready", "192.0.2.0/24"),
+    ("http://10.53.0.2:8001/internal/ready", "10.52.0.0/24"),
+    ("http://10.52.0.2:8000/internal/ready", "10.52.0.0/24"),
+    ("http://10.52.0.2:8001/internal/other", "10.52.0.0/24"),
+    ("http://10.52.0.2:8001/internal/ready?token=abc", "10.52.0.0/24"),
+    ("http://user@10.52.0.2:8001/internal/ready", "10.52.0.0/24"),
+    ("http://10.52.0.2:8001/internal/ready", ""),
+])
+def test_vpc_callback_rejects_public_wrong_network_or_credentials(url, subnet):
+    with pytest.raises(ValueError, match="VPC"):
+        docker_user_data(url, "R" * 36, True, vpc_callback=True, vpc_subnet=subnet)
+
+
 def test_invalid_callback_is_rejected_before_provisioning():
     async def request():
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: pytest.fail("Network call"))) as client:
@@ -186,6 +214,115 @@ def test_invalid_callback_is_rejected_before_provisioning():
 
     with pytest.raises(ValueError):
         asyncio.run(request())
+
+
+def test_create_disposable_instance_attaches_only_validated_vpc():
+    vpc_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(202, json={"instance": {"id": "instance-123"}})
+
+    async def request():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            api = VultrInstances(client, "account-key")
+            await api.create_with_user_data("ord", "vx1-g-2c-8g-120s", 2284, "cerberus-test", ["cerberus"], "#!/bin/sh\ntrue\n", vpc_ids=[vpc_id])
+            with pytest.raises(ValueError, match="VPC"):
+                await api.create_with_user_data("ord", "vx1-g-2c-8g-120s", 2284, "cerberus-test", ["cerberus"], "#!/bin/sh\ntrue\n", vpc_ids=["not-a-vpc-id"])
+
+    asyncio.run(request())
+    payload = json.loads(requests[0].content)
+    assert payload["attach_vpc"] == [vpc_id]
+    assert "enable_vpc" not in payload
+    assert len(requests) == 1
+
+
+def test_vpc_smoke_provisioning_uses_private_callback_and_no_netbird_key():
+    vpc_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(202, json={"instance": {"id": "instance-123"}})
+
+    async def request():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await VultrInstances(client, "account-key").create(
+                "ord", "vx1-g-2c-8g-120s", 2284, "http://10.52.0.2:8001/internal/ready", "R" * 36,
+                opensandbox_spike=True, vpc_callback=True, vpc_subnet="10.52.0.0/24", vpc_id=vpc_id,
+            )
+
+    assert asyncio.run(request()) == "instance-123"
+    payload = json.loads(requests[0].content)
+    script = base64.b64decode(payload["user_data"]).decode()
+    assert payload["attach_vpc"] == [vpc_id]
+    assert "netbird up" not in script
+    assert "http://10.52.0.2:8001/internal/ready" in script
+    assert "account-key" not in script
+
+
+def test_vultr_vpc_metadata_and_control_attachment_are_checked_read_only():
+    vpc_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    seen = []
+
+    def respond(request):
+        seen.append(request.url.path)
+        if request.url.path == f"/v2/vpcs/{vpc_id}":
+            return httpx.Response(200, json={"vpc": {"id": vpc_id, "region": "ord", "v4_subnet": "10.52.0.0", "v4_subnet_mask": 24}})
+        return httpx.Response(200, json={"vpcs": [{"id": vpc_id, "ip_address": "10.52.0.2"}]})
+
+    async def request():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            api = VultrInstances(client, "account-key")
+            return await api.get_vpc(vpc_id), await api.list_instance_vpcs("control-123")
+
+    vpc, attached = asyncio.run(request())
+    assert vpc["region"] == "ord"
+    assert attached == [{"id": vpc_id, "ip_address": "10.52.0.2"}]
+    assert seen == [f"/v2/vpcs/{vpc_id}", "/v2/instances/control-123/vpcs"]
+
+
+def test_vpc_setup_uses_exact_private_region_and_instance_attachment():
+    vpc_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    control_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    calls = []
+
+    def respond(request):
+        calls.append((request.method, request.url.path, json.loads(request.content) if request.content else None))
+        if request.url.path == "/v2/vpcs":
+            return httpx.Response(201, json={"vpc": {"id": vpc_id, "region": "ord", "v4_subnet": "10.52.0.0", "v4_subnet_mask": 24}})
+        if request.method == "POST":
+            return httpx.Response(200)
+        return httpx.Response(200, json={"vpcs": [{"id": vpc_id, "ip_address": "10.52.0.2"}]})
+
+    async def request():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            api = VultrInstances(client, "account-key")
+            vpc = await api.create_vpc("ord", "cerberus-vpc", "10.52.0.0/24")
+            ip = await api.attach_vpc(control_id, vpc_id, "10.52.0.0/24", interval=0)
+            return vpc, ip
+
+    vpc, address = asyncio.run(request())
+    assert vpc["id"] == vpc_id and address == "10.52.0.2"
+    assert calls[0] == ("POST", "/v2/vpcs", {"region": "ord", "description": "cerberus-vpc", "v4_subnet": "10.52.0.0", "v4_subnet_mask": 24})
+    assert calls[1] == ("POST", f"/v2/instances/{control_id}/vpcs/attach", {"vpc_id": vpc_id})
+
+
+def test_wait_for_vpc_attachment_retries_until_private_ip_is_assigned():
+    vpc_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    calls = []
+
+    def respond(request):
+        calls.append(request.url.path)
+        return httpx.Response(200, json={"vpcs": [] if len(calls) == 1 else [{"id": vpc_id, "ip_address": "10.52.0.3"}]})
+
+    async def request():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await VultrInstances(client, "account-key").wait_vpc_attachment("instance-123", vpc_id, "10.52.0.0/24", interval=0)
+
+    assert asyncio.run(request()) == "10.52.0.3"
+    assert calls == ["/v2/instances/instance-123/vpcs"] * 2
 
 
 def test_poll_active_and_always_destroy_on_failure():
@@ -320,6 +457,27 @@ def test_ready_callback_rejects_invalid_opensandbox_result():
     asyncio.run(request())
 
 
+def test_vpc_ready_proof_rejects_public_address():
+    proof = {
+        "hostname": "vx1-test", "uname": "Linux vx1-test x86_64", "cpu_virt": "svm",
+        "kvm_device": True, "kvm_access": True, "runtime": "runsc",
+        "sandbox_hostname": "sandbox-test", "sandbox_uname": "Linux gvisor", "exit_code": 0,
+    }
+
+    async def request():
+        token = ready_signals.register()
+        try:
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=vpc_callback_app), base_url="http://10.52.0.2:8001") as client:
+                headers = {"Authorization": f"Bearer {token}"}
+                public = await client.post("/internal/ready", headers=headers, json={**proof, "vpc_ip": "192.0.2.10"})
+                private = await client.post("/internal/ready", headers=headers, json={**proof, "vpc_ip": "10.52.0.3"})
+            return public.status_code, private.status_code
+        finally:
+            ready_signals.unregister(token)
+
+    assert asyncio.run(request()) == (400, 204)
+
+
 def test_private_stage_callback_records_progress_without_claiming_readiness():
     async def request():
         token = ready_signals.register()
@@ -376,6 +534,49 @@ def test_temporary_callback_server_exposes_no_other_routes():
 
     home, docs, schema, wrong_method, unauthorized, private_failure, private_stage = asyncio.run(request())
     assert [response.status_code for response in (home, docs, schema, wrong_method, unauthorized, private_failure, private_stage)] == [404, 404, 404, 405, 404, 404, 404]
+
+
+def test_vpc_listener_is_callback_only_and_operator_api_stays_on_netbird():
+    async def request():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=control_server_app), base_url="http://10.52.0.2:8001") as vpc:
+            statuses = [
+                (await vpc.get("/health")).status_code,
+                (await vpc.post("/jobs", json={"type": "connectivity"})).status_code,
+                (await vpc.get("/docs")).status_code,
+                (await vpc.post("/internal/ready")).status_code,
+                (await vpc.post("/internal/stage")).status_code,
+            ]
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=control_server_app, client=("100.124.192.1", 12345)), base_url="http://100.124.55.15:8000") as operator:
+            operator_health = (await operator.get("/health")).status_code
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=control_server_app, client=("10.52.0.3", 12345)), base_url="http://100.124.55.15:8000") as sandbox:
+            sandbox_to_operator = (await sandbox.get("/health")).status_code
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=control_server_app), base_url="http://127.0.0.1:8002") as other:
+            other_health = (await other.get("/health")).status_code
+        return statuses, operator_health, sandbox_to_operator, other_health
+
+    assert asyncio.run(request()) == ([404, 404, 404, 404, 404], 200, 404, 404)
+    assert not any(route.path == "/internal/control-ready" for route in vpc_callback_app.routes)
+
+
+def test_vpc_callback_shares_readiness_state_only_with_approved_vpc_clients(monkeypatch):
+    monkeypatch.setenv("CERBERUS_VPC_SUBNET", "10.52.0.0/24")
+
+    async def request():
+        token = ready_signals.register()
+        try:
+            transport = httpx.ASGITransport(app=control_server_app, client=("10.52.0.3", 12345))
+            async with httpx.AsyncClient(transport=transport, base_url="http://10.52.0.2:8001") as client:
+                ok = await client.post("/internal/stage", headers={"Authorization": f"Bearer {token}"}, json={"stage": "docker_install"})
+                listener = await client.head("/internal/stage")
+                jobs = await client.post("/jobs", json={"type": "connectivity"})
+            blocked_transport = httpx.ASGITransport(app=control_server_app, client=("192.0.2.10", 12345))
+            async with httpx.AsyncClient(transport=blocked_transport, base_url="http://10.52.0.2:8001") as client:
+                blocked = await client.post("/internal/stage", headers={"Authorization": f"Bearer {token}"}, json={"stage": "runtime_smoke"})
+            return ok.status_code, listener.status_code, jobs.status_code, blocked.status_code, ready_signals.stage(token)
+        finally:
+            ready_signals.unregister(token)
+
+    assert asyncio.run(request()) == (204, 405, 404, 404, "docker_install")
 
 
 def test_ready_timeout():

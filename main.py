@@ -98,6 +98,13 @@ async def instance_ready(request: Request, authorization: str | None = Header(de
             raise HTTPException(status_code=400)
         if address not in ipaddress.ip_network("100.64.0.0/10"):
             raise HTTPException(status_code=400)
+    if "vpc_ip" in proof:
+        try:
+            address = ipaddress.ip_address(proof["vpc_ip"])
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400)
+        if not isinstance(address, ipaddress.IPv4Address) or not any(address in ipaddress.ip_network(block) for block in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")):
+            raise HTTPException(status_code=400)
     if not ready_signals.signal(token, proof):
         raise HTTPException(status_code=404)
     return Response(status_code=204)
@@ -173,6 +180,34 @@ callback_app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 callback_app.add_api_route("/internal/ready", instance_ready, methods=["POST"])
 callback_app.add_api_route("/internal/control-ready", control_ready, methods=["POST"])
 
+vpc_callback_app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+vpc_callback_app.add_api_route("/internal/ready", instance_ready, methods=["POST"])
+vpc_callback_app.add_api_route("/internal/stage", instance_stage, methods=["POST"])
+vpc_callback_app.add_api_route("/internal/failed", instance_failed, methods=["POST"])
+
+
+async def control_server_app(scope, receive, send):
+    if scope["type"] == "lifespan":
+        await app(scope, receive, send)
+        return
+    server = scope.get("server")
+    port = server[1] if server and len(server) >= 2 else None
+    target = app if port == 8000 else vpc_callback_app if port == 8001 else None
+    if port in (8000, 8001):
+        try:
+            client_ip = ipaddress.ip_address(scope["client"][0])
+            allowed = ipaddress.ip_network("100.64.0.0/10") if port == 8000 else ipaddress.ip_network(os.environ["CERBERUS_VPC_SUBNET"])
+            if client_ip not in allowed:
+                target = None
+        except (KeyError, TypeError, ValueError):
+            target = None
+    if target is not None:
+        await target(scope, receive, send)
+    elif scope["type"] == "websocket":
+        await send({"type": "websocket.close", "code": 1008})
+    else:
+        await Response(status_code=404)(scope, receive, send)
+
 
 @app.post("/jobs", status_code=202)
 async def start_job(request: JobRequest, authorization: str | None = Header(default=None)):
@@ -180,12 +215,17 @@ async def start_job(request: JobRequest, authorization: str | None = Header(defa
     if request.type == "sandbox_smoke":
         if os.getenv("CERBERUS_ENABLE_SANDBOX_JOBS") != "true":
             raise HTTPException(status_code=503, detail="Sandbox jobs are disabled")
-        if request.approve_vm is not True or request.netbird_setup_key is None:
-            raise HTTPException(status_code=400, detail="Explicit approval and one-off NetBird key required")
-        key = request.netbird_setup_key.get_secret_value()
-        if not re.fullmatch(r"[A-Za-z0-9-]{32,128}", key):
-            raise HTTPException(status_code=400, detail="One-off NetBird key format is invalid")
-        job = job_registry.create(request.type, key, ready_signals)
+        if request.approve_vm is not True:
+            raise HTTPException(status_code=400, detail="Explicit VM approval required")
+        if request.netbird_setup_key is not None:
+            key = request.netbird_setup_key.get_secret_value()
+            if not re.fullmatch(r"[A-Za-z0-9-]{32,128}", key):
+                raise HTTPException(status_code=400, detail="One-off NetBird key format is invalid")
+            job = job_registry.create(request.type, key, ready_signals)
+        else:
+            if not all(os.getenv(name) for name in ("CERBERUS_VPC_ID", "CERBERUS_CONTROL_INSTANCE_ID", "CERBERUS_CONTROL_VPC_IP", "CERBERUS_VPC_SUBNET")):
+                raise HTTPException(status_code=503, detail="VPC sandbox jobs are not configured")
+            job = job_registry.create(request.type, None, ready_signals, vpc_mode=True)
     else:
         if request.approve_vm or request.netbird_setup_key is not None:
             raise HTTPException(status_code=400, detail="Connectivity jobs do not accept sandbox credentials")
