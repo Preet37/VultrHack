@@ -26,6 +26,10 @@ import time
 import uuid
 from pathlib import Path
 
+import httpx
+
+from finder.remediate import _start_target, _stop, free_port
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse
 
@@ -147,6 +151,62 @@ async def _clone_repo(url: str, emit) -> str:
     return tmp
 
 
+_ENTRYPOINTS = ["app.py", "run.py", "server.py", "main.py", "wsgi.py", "application.py", "manage.py"]
+
+
+def _detect_entrypoint(d: str) -> str | None:
+    """Find a runnable Flask entrypoint in a cloned repo (root-level only, for the demo)."""
+    base = Path(d)
+    for cand in _ENTRYPOINTS:
+        if (base / cand).exists():
+            return cand
+    for p in sorted(base.glob("*.py")):
+        try:
+            txt = p.read_text(errors="ignore")
+            if "Flask(" in txt and "run(" in txt:
+                return p.name
+        except OSError:
+            continue
+    return None
+
+
+class _LenientRunner:
+    """Boot a cloned Flask app tier-1 and treat it healthy if / OR /health answers.
+
+    (LocalSubprocessRunner requires /health; real-world repos rarely expose it.)
+    """
+
+    def __init__(self, source_dir: str, entrypoint: str):
+        self._source_dir = source_dir
+        self._entrypoint = entrypoint
+        self._proc = None
+
+    def start(self) -> str:
+        port = free_port()
+        base = f"http://127.0.0.1:{port}"
+        self._proc = _start_target(Path(self._source_dir), self._entrypoint, port)
+        deadline = time.monotonic() + 22.0
+        with httpx.Client(timeout=2.0) as client:
+            while time.monotonic() < deadline:
+                if self._proc.poll() is not None:
+                    self.stop()
+                    raise RuntimeError("target exited on boot (missing deps or a crash)")
+                for path in ("/", "/health"):
+                    try:
+                        if client.get(base + path).status_code < 500:
+                            return base
+                    except httpx.HTTPError:
+                        pass
+                time.sleep(0.2)
+        self.stop()
+        raise RuntimeError("cloned target never answered on / or /health")
+
+    def stop(self) -> None:
+        if self._proc is not None:
+            _stop(self._proc)
+            self._proc = None
+
+
 @app.websocket("/scan")
 async def scan(ws: WebSocket):
     await ws.accept()
@@ -164,7 +224,6 @@ async def scan(ws: WebSocket):
 
     url = str(req.get("url", "")).strip()
     cloned = None
-    display = None
     try:
         if url:
             cloned = await _clone_repo(url, emit)
@@ -172,19 +231,30 @@ async def scan(ws: WebSocket):
             # A cloned repo is untrusted. In the DEMO we run a runnable Flask app
             # tier-1 (local subprocess, same as our seeded targets) so the finder can
             # prove real bugs live; in production this runs in the gVisor sandbox.
-            if (Path(cloned) / "manifest.json").exists() or (Path(cloned) / "app.py").exists():
-                source = cloned
+            has_manifest = (Path(cloned) / "manifest.json").exists()
+            entrypoint = _detect_entrypoint(cloned)
+            if has_manifest or entrypoint:
                 await emit(type="log", level="dim", ts=_clk(),
-                           text="demo runs the cloned app tier-1 (local subprocess); production runs untrusted repos in the gVisor sandbox (#16)")
+                           text=f"detected entrypoint: {entrypoint or 'app.py (manifest)'} · running tier-1 (production uses the gVisor sandbox, #16)")
+                try:
+                    await _run_real_scan(cloned, emit, display_name=display,
+                                         lenient=not has_manifest,
+                                         entrypoint_override=None if has_manifest else entrypoint)
+                except RuntimeError as exc:
+                    # tier-1 can't build a repo that pins its own (often ancient) deps —
+                    # which is exactly what the disposable gVisor sandbox is for.
+                    await emit(type="log", level="warn", ts=_clk(), text=f"tier-1 boot failed: {str(exc)[:80]}")
+                    await emit(type="cloned_only", url=url,
+                               detail="this repo needs its own build/dependencies — routed to the gVisor sandbox")
+                    await emit(type="log", level="ok", ts=_clk(),
+                               text="untrusted repos with their own deps build + run in the disposable sandbox (Sasha's sandbox_scan, #16) — not on the control host")
             else:
                 await emit(type="cloned_only", url=url,
-                           detail="repo cloned · no runnable Flask entrypoint · routed to the sandbox")
+                           detail="repo cloned · no runnable Flask entrypoint found · routed to the sandbox")
                 await emit(type="log", level="ok", ts=_clk(),
-                           text="cloned OK — no app.py; dispatching to the disposable gVisor sandbox (#16)")
-                return
+                           text="cloned OK — no Flask entrypoint; dispatching to the disposable gVisor sandbox (#16)")
         else:
-            source = str(_resolve(str(req.get("target", "seeded_flask"))))
-        await _run_real_scan(source, emit, display_name=display)
+            await _run_real_scan(str(_resolve(str(req.get("target", "seeded_flask")))), emit)
     except WebSocketDisconnect:
         return
     except Exception as exc:  # never crash the socket on a scan error
@@ -204,7 +274,8 @@ def _clk() -> str:
     return time.strftime("%H:%M:%S", time.localtime(now)) + f".{int((now % 1) * 1000):03d}"
 
 
-async def _run_real_scan(source_dir: str, emit, display_name: str | None = None):
+async def _run_real_scan(source_dir: str, emit, display_name: str | None = None,
+                         lenient: bool = False, entrypoint_override: str | None = None):
     """Stream a real scan as four acts: Detonate -> Breach -> Remediate -> Re-verify.
 
     Every number, canary, patch diff and verdict comes from an actual run. The
@@ -213,7 +284,7 @@ async def _run_real_scan(source_dir: str, emit, display_name: str | None = None)
     (Act 3) and each fix is re-proven against the original exploit (Act 4).
     """
     manifest = load_manifest(source_dir) or {}
-    entrypoint = manifest.get("entrypoint", "app.py")
+    entrypoint = entrypoint_override or manifest.get("entrypoint", "app.py")
     instance = "cerberus-" + uuid.uuid4().hex[:12]
     name = display_name or Path(source_dir).name
 
@@ -249,7 +320,7 @@ async def _run_real_scan(source_dir: str, emit, display_name: str | None = None)
                       ("Jinja2-3.1.3", "133 kB"), ("click-8.1.7", "97 kB")]:
         await dl(f"downloading {pkg}", size)
     await log("info", "binding target to guest VPC IPv4 · tcp/8081 · scoped iptables accept · egress default-deny")
-    runner = LocalSubprocessRunner(source_dir, entrypoint)
+    runner = _LenientRunner(source_dir, entrypoint) if lenient else LocalSubprocessRunner(source_dir, entrypoint)
     base = await asyncio.to_thread(runner.start)
     await emit(type="netbird", stage="active")
     await log("ok", "health-proved over the VPC · target is live in the sandbox")
