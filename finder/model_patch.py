@@ -105,9 +105,19 @@ def model_review(
     sink_symbol: str,
     new_source: str,
     client: InferenceClient | None = None,
+    avoid_model: str | None = None,
 ) -> dict | None:
-    """Independent model verdict on the patched function. None if unavailable."""
-    client = client or InferenceClient()
+    """Independent model verdict on the patched function. None if unavailable.
+
+    When no explicit ``client`` is given, a fresh client is used and steered to a
+    DIFFERENT model than the writer (``avoid_model``) when the account exposes
+    more than one, so the reviewer is not the same model weights that wrote the
+    patch. The re-exploit remains the only fully independent judge regardless.
+    """
+    if client is None:
+        client = InferenceClient()
+        if client.available:
+            client.pick_model(avoid=avoid_model)
     if not client.available:
         return None
     fn_seg = _function_segment(new_source, sink_symbol) or new_source
@@ -117,7 +127,11 @@ def model_review(
         'Respond with ONLY this JSON shape:\n'
         '{"closed": true or false, "over_blocks": true or false, "reason": "<one short line>"}'
     )
+    # One retry: the review is the primary gate for novel patches, so a transient
+    # non-JSON reply should not silently drop it to "unavailable".
     data = client.complete_json(_REVIEW_SYS, user)
+    if not isinstance(data, dict) or "closed" not in data:
+        data = client.complete_json(_REVIEW_SYS, user)
     if not isinstance(data, dict) or "closed" not in data:
         return None
     return {

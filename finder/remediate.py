@@ -168,10 +168,13 @@ def _functional_ok(finding: Finding, base: str, canaries: list[str], timeout: fl
         # (the guard's own rejection) means the patch over-blocks.
         return resp.status_code != 403
     if finding.vuln_class == "ssrf":
-        # A legitimate public URL must not be policy-blocked (403) by the guard.
-        # With no egress it may return 502 (DNS/fetch failure) or 200 (fetched);
-        # both are fine. Only a 403 means the patch over-blocks an allowed host.
-        return resp.status_code != 403
+        # A legitimate public URL must ACTUALLY be fetched (200) after the patch.
+        # Requiring only "not 403" was vacuous: a patch that disables all outbound
+        # fetching returns 502 for everything and would pass. A 200 proves the fix
+        # both allows the legitimate host AND still fetches -- the only honest way
+        # to catch a maximal over-block. This needs egress to a real allowed host;
+        # without it, SSRF functional parity genuinely cannot be proven.
+        return resp.status_code == 200
     low = resp.text.lower()
     return resp.status_code == 200 and "traceback" not in low and "query error" not in low
 
@@ -345,46 +348,69 @@ def remediate(finding: Finding, source_dir: str, *, timeout: float = 12.0) -> Re
             return patch_source(finding.vuln_class, sink_symbol, original)
         return model_write_patch(finding, sink_symbol, original, client)
 
-    accepted = None      # (label, patch, evidence, func_ok)
-    first_patch = None   # for reporting when nothing certifies
+    attempts = []  # (label, patch, blocked, evidence, func_ok) -- one per candidate tried
+    accepted = None
     for label in order:
-        patch = build(label)  # model patch is only built when this label is reached
+        patch = build(label)  # the model patch is only built when this label is reached
         if patch is None:
             continue
-        if first_patch is None:
-            first_patch = (label, patch)
         blocked, evidence, func_ok = _try_patch(finding, source_dir, entrypoint, patch.new_source, canaries, benign, timeout)
-        result.reexploit_blocked, result.reexploit_evidence, result.functional_ok = blocked, evidence, func_ok
+        attempts.append((label, patch, blocked, evidence, func_ok))
         if blocked and func_ok:
-            accepted = (label, patch, evidence, func_ok)
+            accepted = attempts[-1]
             break
 
-    if first_patch is None:
+    if not attempts:
         result.validation_notes = "no patch produced: no deterministic patcher matched and no model patch was available"
         return result
 
-    label, patch = accepted[:2] if accepted else first_patch
+    # Report exactly one candidate so the diff, re-exploit evidence and functional
+    # result all describe the same patch: the accepted one, else the first tried.
+    label, patch, blocked, evidence, func_ok = accepted or attempts[0]
     result.patched = True
     result.patch_source = label
     result.patch_description = patch.description
     result.patch_diff = _diff(original, patch.new_source, finding.sink_file)
+    result.reexploit_blocked = blocked
+    result.reexploit_evidence = evidence
+    result.functional_ok = func_ok
     result.regression_test = _regression_test(finding, canaries)
 
     static_ok, static_note = _validate(finding, sink_symbol, patch.new_source)
-    if accepted and label == "vultr-inference":
-        # The model wrote this patch, so an independent model must confirm it --
-        # the writer never certifies its own work. The re-exploit already proved
-        # the canary is gone; this guards against a subtly over-blocking fix.
-        review = model_review(finding, sink_symbol, patch.new_source, client)
-        result.independent_review = review
-        if review is None:
+    if label == "vultr-inference":
+        # A model wrote this patch. Do NOT require the deterministic static-template
+        # check -- it only recognizes the seeded shapes, so it would reject valid
+        # patches for arbitrary code (the whole point of the model patcher). The
+        # gate is instead: re-exploit blocked + functional preserved + an
+        # INDEPENDENT model reviewer (a different model than the writer) agreeing
+        # the class is closed and the fix does not over-block. The re-exploit stays
+        # the only fully independent judge.
+        if not (blocked and func_ok):
             result.validated = False
-            result.validation_source = "static + independent review UNAVAILABLE"
-            result.validation_notes = static_note + "; no independent reviewer available — a model patch is not certified on its own"
+            result.validation_source = "not certified — patch did not close the class or broke functionality"
+            result.validation_notes = static_note
         else:
-            result.validated = static_ok and review["closed"] and not review["over_blocks"]
-            result.validation_source = "static + independent " + review["model"]
-            result.validation_notes = static_note + f"; reviewer: {review['reason']}"
+            review = model_review(finding, sink_symbol, patch.new_source, avoid_model=getattr(client, "_model", None))
+            result.independent_review = review
+            if review is not None:
+                # An explicit independent verdict decides -- a dissent (not closed,
+                # or over-blocks) blocks certification even if static analysis is
+                # happy, so the reviewer is never overruled.
+                result.validated = review["closed"] and not review["over_blocks"]
+                result.validation_source = "re-exploit + independent " + review["model"]
+                note = "reviewer: " + review["reason"]
+                result.validation_notes = (static_note + "; " + note) if static_ok else note
+            elif static_ok:
+                # No reviewer available (transient), but the static analyzer -- which
+                # is independent of the model writer -- recognizes the fix. That is a
+                # valid independent certification of a recognized shape.
+                result.validated = True
+                result.validation_source = "static-validator (independent of the model writer)"
+                result.validation_notes = static_note + "; independent model review unavailable, fell back to static analysis"
+            else:
+                result.validated = False
+                result.validation_source = "independent review UNAVAILABLE"
+                result.validation_notes = "no independent reviewer and static analysis does not recognize the fix — not certified"
     else:
         # Deterministic patch: the writer is code, and the static AST check plus
         # the re-exploit are already independent of any model.
