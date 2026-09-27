@@ -13,20 +13,9 @@ from finder import confirm as confirm_mod
 from finder.inference import InferenceClient
 from finder.models import Coverage, FinderReport, Finding
 from finder.playbooks import confirmer_for
-from finder.recon import recon
+from finder.recon import canaries_for, recon
 from finder.static_sweep import sweep
 from finder.triage import CONFIDENCE_THRESHOLD, triage
-
-
-def _canaries_for(manifest: dict | None) -> list[str]:
-    """All planted canaries whose appearance outside the box proves an exploit."""
-    if not manifest:
-        return ["CANARY-a1b2c3d4e5f60718-DO-NOT-EXFIL"]
-    out = []
-    for key in ("canary", "file_canary"):
-        if manifest.get(key):
-            out.append(manifest[key])
-    return out or ["CANARY-a1b2c3d4e5f60718-DO-NOT-EXFIL"]
 
 
 def run_finder(
@@ -42,7 +31,7 @@ def run_finder(
 
     # 1) Recon.
     routes, manifest = recon(base_url, source_dir)
-    canaries = _canaries_for(manifest)
+    canaries = canaries_for(manifest)
     route_dicts = [r.to_dict() for r in routes]
 
     # 2) Static sweep (needs source; without it we can only test manifest routes).
