@@ -30,6 +30,15 @@ def test_web_tier_enforces_pinned_sha_and_safe_values():
         web_tier_user_data(SHA, "NB" + "k" * 38, "C" * 40, "demo-pass", "W" * 48 + "\nsneaky")
 
 
+def test_web_tier_user_data_with_domain_adds_certbot_service():
+    script = web_tier_user_data(SHA, "NB" + "k" * 38, "C" * 40, "demo-pass", "W" * 48, domain="trycerberus.duckdns.org")
+    assert subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True).returncode == 0
+    assert "certbot certonly --standalone --noninteractive" in script
+    assert "trycerberus.duckdns.org" in script
+    assert "ufw allow 80/tcp" in script
+    assert "cerberus-le.service" in script
+
+
 def test_create_web_tier_payload_shape():
     payload = build_create_web_tier_payload(web_tier_user_data(SHA, "NB" + "k" * 38, "C" * 40, "demo-pass", "W" * 48), "ord", "vc2-1c-1gb")
     assert payload["region"] == "ord" and payload["plan"] == "vc2-1c-1gb"

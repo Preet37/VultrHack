@@ -16,7 +16,10 @@ import shlex
 import zlib
 
 
-def web_tier_user_data(repo_sha, netbird_setup_key, control_token, demo_password, web_secret=None, progress_form=None):
+def web_tier_user_data(repo_sha, netbird_setup_key, control_token, demo_password, web_secret=None, progress_form=None, domain=None):
+    if domain is not None:
+        if not re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*(\.[a-z0-9]+(-[a-z0-9]+)*)*", domain):
+            raise ValueError("Domain must be a plain DNS name")
     if progress_form is not None:
         from instance_lifecycle import validated_presigned_nic_post
 
@@ -29,6 +32,42 @@ def web_tier_user_data(repo_sha, netbird_setup_key, control_token, demo_password
     for name, value in (("setup key", netbird_setup_key), ("control token", control_token), ("demo password", demo_password), ("web secret", web_secret)):
         if not isinstance(value, str) or not value or len(value) > 512 or not value.isprintable() or any(c in value for c in "'\"\\$\n"):
             raise ValueError(f"{name} cannot be embedded safely")
+    if domain is not None:
+        letsencrypt_tail = f"""
+cat > /usr/local/bin/cerberus-le <<'LE'
+#!/bin/sh
+while :; do
+  SELF=$(curl -fsS --max-time 10 https://checkip.amazonaws.com || :)
+  DNS=$(getent hosts {shlex.quote(domain)} | awk '{{print $1}}')
+  if [ -n "$SELF" ] && [ "$SELF" = "$DNS" ]; then
+    certbot certonly --standalone --noninteractive --agree-tos --register-unsafely-without-email -d {shlex.quote(domain)} && {{
+      ln -sf /etc/letsencrypt/live/{shlex.quote(domain)}/fullchain.pem /etc/cerberus-web/tls.crt
+      ln -sf /etc/letsencrypt/live/{shlex.quote(domain)}/privkey.pem /etc/cerberus-web/tls.key
+      systemctl restart cerberus-web
+      exit 0
+    }}
+  fi
+  sleep 30
+done
+LE
+chmod +x /usr/local/bin/cerberus-le
+cat > /etc/systemd/system/cerberus-le.service <<'LEU'
+[Unit]
+Description=Swap to the real TLS cert once DuckDNS points here
+After=network-online.target cerberus-web.service
+
+[Service]
+ExecStart=/usr/local/bin/cerberus-le
+Restart=never
+
+[Install]
+WantedBy=multi-user.target
+LEU
+systemctl daemon-reload
+systemctl enable --now cerberus-le || :
+"""
+    else:
+        letsencrypt_tail = ""
     env_body = "\n".join([
         "CERBERUS_CONTROL_URL=http://100.124.55.15:8000",
         f"CERBERUS_CONTROL_TOKEN={control_token}",
@@ -64,7 +103,12 @@ cd /opt/cerberus-web/app && git checkout -q {repo_sha}
 python3 -m venv /opt/cerberus-web/venv
 /opt/cerberus-web/venv/bin/pip install -q fastapi==0.136.3 uvicorn==0.38.0 httpx==0.28.1 python-dotenv==1.2.1
 cerberus_progress code_ready || :
+cat > /etc/cerberus-web/selfsign.sh <<'SS'
+#!/bin/sh
 openssl req -x509 -newkey rsa:2048 -keyout /etc/cerberus-web/tls.key -out /etc/cerberus-web/tls.crt -days 365 -nodes -subj '/CN=cerberus-demo' >/dev/null 2>&1
+SS
+chmod +x /etc/cerberus-web/selfsign.sh
+/etc/cerberus-web/selfsign.sh
 cat > /etc/systemd/system/cerberus-web.service <<'UNIT'
 [Unit]
 Description=Cerberus demo web tier
@@ -85,13 +129,16 @@ UNIT
 systemctl daemon-reload
 systemctl enable --now cerberus-web
 cerberus_progress service_started || :
+apt-get install -y -q certbot python3-certbot-standalone 2>&1 | tail -1
 if command -v ufw >/dev/null 2>&1; then
   ufw default deny incoming || :
   ufw allow in on wt0 || :
   ufw allow 443/tcp || :
+  ufw allow 80/tcp || :
   yes | ufw enable || :
 fi
 cerberus_progress firewall_done || :
+{letsencrypt_tail}
 """
 
 
