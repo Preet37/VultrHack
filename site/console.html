@@ -55,7 +55,7 @@
 
   .launcher{position:absolute;left:50%;bottom:118px;transform:translateX(-50%);width:min(720px,86%);z-index:2;transition:opacity .35s,transform .35s}
   .launcher.gone{opacity:0;transform:translateX(-50%) translateY(20px);pointer-events:none}
-  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px}
+  .cards{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-bottom:14px}
   .rc{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;cursor:pointer;text-align:left;transition:transform .15s,box-shadow .2s,border-color .2s;color:var(--ink);box-shadow:var(--sh2)}
   .rc:hover{transform:translateY(-3px);box-shadow:var(--sh)}
   .rc.on{border-color:var(--lime);box-shadow:0 0 0 1.5px var(--lime),var(--sh2)}
@@ -311,6 +311,7 @@
           <div class="cards" id="cards">
             <button class="rc on" data-t="seeded_flask"><span class="ic">🧪</span><div class="t">seeded_flask</div><div class="d">Flask app · 5 planted vulns</div></button>
             <button class="rc" data-t="snipstash"><span class="ic">📦</span><div class="t">snipstash</div><div class="d">snippet store API</div></button>
+            <button class="rc" data-t="clean_flask"><span class="ic">✅</span><div class="t">clean_flask</div><div class="d">safe app · nothing to find</div></button>
             <button class="rc" data-url="1"><span class="ic">🔗</span><div class="t">Paste a GitHub URL</div><div class="d">clone &amp; detonate any repo</div></button>
           </div>
           <div class="prompt">
@@ -644,7 +645,7 @@
     catch(e){term("err","","cannot reach server — run: uvicorn demo_server:app --port 8000");running=false;return;}
     ws.onopen=function(){var v=$("#repo").value.trim();
       var isUrl=/^(https?:\/\/|git@)/.test(v);
-      ws.send(JSON.stringify(isUrl?{url:v}:{target:(sel||v||"seeded_flask")}));};
+      ws.send(JSON.stringify(isUrl?{url:v}:{target:(v||sel||"seeded_flask")}));};
     ws.onmessage=function(m){var ev;try{ev=JSON.parse(m.data);}catch(_){return;}handle(ev);};
     ws.onerror=function(){term("err","","socket error — is the server up?");};
     ws.onclose=function(){running=false;stopUptime();};
@@ -667,7 +668,8 @@
       else if(ev.stage==="destroy"){$("#nested").classList.remove("breach");$("#nested").classList.add("dead");$("#ctag").textContent="destroyed · shredded";
         agState("contain","done","instance destroyed");}
     }
-    else if(ev.type==="triage"){meta.model=(ev.source||"").replace("vultr-inference:","");
+    else if(ev.type==="triage"){var _s=(ev.source||"").replace("vultr-inference:","");
+      meta.model=(/offline|no key/i.test(_s))?"static sweep · no risky sinks":_s;
       agState("recon","done",(ev.classes||[]).length+" classes reachable");
       agState("triage","done",ev.found+" candidates ≥ conf 7");agState("exploit","on","firing exploits");}
     else if(ev.type==="exploit"){conf=ev.confirmed;var d=fd(ev.cls);d.endpoint=ev.endpoint;d.param=ev.param;d.chain=ev.chain;d.canary=ev.canary;d.proof=ev.proof;d.impact=ev.impact;

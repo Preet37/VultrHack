@@ -263,7 +263,11 @@ async def _run_real_scan(source_dir: str, emit):
         await log("ok", f"recon: {len(classes)} vuln classes reachable — {', '.join(classes)}")
         await emit(type="triage", source=report.triage_source,
                    classes=classes, found=len(report.findings))
-        await log("info", f"triage: ranking sinks on {report.triage_source}")
+        _src = report.triage_source or ""
+        if "offline" in _src or "no key" in _src:
+            await log("info", "triage: static sweep surfaced no risky sinks — nothing to rank")
+        else:
+            await log("info", f"triage: ranking sinks on {_src}")
         await log("ok", f"triage: {len(report.findings)} candidates ≥ confidence 7 — arming canaries")
 
         findings = list(report.findings)
