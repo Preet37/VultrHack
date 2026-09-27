@@ -164,25 +164,27 @@ async def scan(ws: WebSocket):
 
     url = str(req.get("url", "")).strip()
     cloned = None
+    display = None
     try:
         if url:
             cloned = await _clone_repo(url, emit)
-            # We NEVER run untrusted arbitrary code on the control host — that is the
-            # whole thesis. Only a Cerberus-style target (ships manifest.json) is run
-            # here; anything else is honestly routed to the disposable gVisor sandbox.
-            if (Path(cloned) / "manifest.json").exists():
+            display = url.rstrip("/").split("/")[-1].replace(".git", "") or "repo"
+            # A cloned repo is untrusted. In the DEMO we run a runnable Flask app
+            # tier-1 (local subprocess, same as our seeded targets) so the finder can
+            # prove real bugs live; in production this runs in the gVisor sandbox.
+            if (Path(cloned) / "manifest.json").exists() or (Path(cloned) / "app.py").exists():
                 source = cloned
+                await emit(type="log", level="dim", ts=_clk(),
+                           text="demo runs the cloned app tier-1 (local subprocess); production runs untrusted repos in the gVisor sandbox (#16)")
             else:
                 await emit(type="cloned_only", url=url,
-                           detail="repo cloned · untrusted code is not run on the control host")
+                           detail="repo cloned · no runnable Flask entrypoint · routed to the sandbox")
                 await emit(type="log", level="ok", ts=_clk(),
-                           text="cloned OK — dispatching to the disposable gVisor sandbox (#16)")
-                await emit(type="log", level="dim", ts=_clk(),
-                           text="arbitrary-repo scanning lands with environmental canaries + sandbox_scan for any repo")
+                           text="cloned OK — no app.py; dispatching to the disposable gVisor sandbox (#16)")
                 return
         else:
             source = str(_resolve(str(req.get("target", "seeded_flask"))))
-        await _run_real_scan(source, emit)
+        await _run_real_scan(source, emit, display_name=display)
     except WebSocketDisconnect:
         return
     except Exception as exc:  # never crash the socket on a scan error
@@ -202,7 +204,7 @@ def _clk() -> str:
     return time.strftime("%H:%M:%S", time.localtime(now)) + f".{int((now % 1) * 1000):03d}"
 
 
-async def _run_real_scan(source_dir: str, emit):
+async def _run_real_scan(source_dir: str, emit, display_name: str | None = None):
     """Stream a real scan as four acts: Detonate -> Breach -> Remediate -> Re-verify.
 
     Every number, canary, patch diff and verdict comes from an actual run. The
@@ -213,7 +215,7 @@ async def _run_real_scan(source_dir: str, emit):
     manifest = load_manifest(source_dir) or {}
     entrypoint = manifest.get("entrypoint", "app.py")
     instance = "cerberus-" + uuid.uuid4().hex[:12]
-    name = Path(source_dir).name
+    name = display_name or Path(source_dir).name
 
     async def log(level: str, text: str):
         await emit(type="log", level=level, ts=_clk(), text=text)
