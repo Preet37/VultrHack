@@ -42,7 +42,12 @@ systemctl mask ssh.socket ssh.service || :
 export DEBIAN_FRONTEND=noninteractive HOME=/root
 {reporter}apt-get update -q && apt-get install -y -q python3-venv curl ca-certificates openssl git-core 2>&1 | tail -1
 cerberus_progress packages_ready || :
-curl -fsSL https://install.netbird.io | sh >/root/netbird-install.log 2>&1
+for attempt in 1 2 3 4 5 6; do
+  getent hosts install.netbird.io >/dev/null && break
+  sleep 5
+done
+curl -fsSL --retry 5 --retry-delay 10 -o /root/netbird-install.sh https://install.netbird.io || {{ cerberus_progress netbird_download_failed || :; false; }}
+sh /root/netbird-install.sh >/root/netbird-install.log 2>&1
 netbird up --setup-key {shlex.quote(netbird_setup_key)} >>/root/netbird-install.log 2>&1
 for i in $(seq 1 20); do netbird status --check ready >/dev/null 2>&1 && break; sleep 3; done
 netbird status --check ready
@@ -92,7 +97,7 @@ cerberus_progress firewall_done || :
 def _progress_reporter(form):
     encoded = base64.b64encode(json.dumps(form, separators=(",", ":")).encode()).decode()
     return f"""cerberus_progress() {{
-  python3 - {shlex.quote("-")} "$1" {shlex.quote(encoded)} <<'PPY'
+  python3 /dev/stdin "$1" {shlex.quote(encoded)} <<'PPY'
 import base64,json,secrets,sys,urllib.request as u
 form=json.loads(base64.b64decode(sys.argv[2]))
 boundary='cerberus'+secrets.token_hex(8)
