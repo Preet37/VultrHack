@@ -107,7 +107,7 @@ class JobRegistry:
         self.arm_hold_seconds = 0
         return hold
 
-    def create(self, kind="connectivity", setup_key=None, signals=None, vpc_mode=False, target=None, diagnostic_hold_seconds=None, diagnostic_upload=None):
+    def create(self, kind="connectivity", setup_key=None, signals=None, vpc_mode=False, target=None, diagnostic_hold_seconds=None, diagnostic_upload=None, target_runtime="gvisor"):
         if kind not in ("connectivity", "sandbox_smoke", "scan", "sandbox_scan"):
             raise ValueError("Unsupported job type")
         if kind == "sandbox_smoke":
@@ -141,7 +141,7 @@ class JobRegistry:
         elif kind == "scan":
             worker = run_scan_job(job, target)
         elif kind == "sandbox_scan":
-            worker = run_sandbox_scan_job(job, target, signals)
+            worker = run_sandbox_scan_job(job, target, signals, target_runtime=target_runtime)
         elif vpc_mode:
             options = {"diagnostic_hold_seconds": diagnostic_hold_seconds} if diagnostic_hold_seconds is not None else {}
             if diagnostic_upload is not None:
@@ -449,7 +449,7 @@ async def run_sandbox_smoke_job(job, setup_key, signals, vpc_mode=False, diagnos
             signals.unregister(token)
 
 
-async def run_sandbox_scan_job(job, target_name, signals):
+async def run_sandbox_scan_job(job, target_name, signals, target_runtime="gvisor"):
     """Scan one seeded target running inside gVisor on a disposable VPC VX1.
 
     Same lifecycle discipline as the VPC smoke (preflight the approved VPC and
@@ -524,7 +524,7 @@ async def run_sandbox_scan_job(job, target_name, signals):
             source_url = presign_source_get(storage, endpoint, bucket, object_key, expires_in=900)
             target_options = {
                 "vpc_callback": True, "vpc_subnet": str(subnet), "vpc_id": vpc_id,
-                "target_run": {"source_url": source_url, "entrypoint": entrypoint},
+                "target_run": {"source_url": source_url, "entrypoint": entrypoint, "runtime": target_runtime},
             }
             async with temporary_instance(api, region, os.getenv("VULTR_PLAN", DEFAULT_VX1_PLAN), 2284, callback, token, False, None, False, **target_options) as instance_id:
                 await api.wait_active(instance_id)
@@ -538,7 +538,8 @@ async def run_sandbox_scan_job(job, target_name, signals):
                     failure_detail = proof.get("failure_detail")
                     raise RuntimeError("Sandbox bootstrap reported a bounded failure stage")
                 base_url = f"http://{sandbox_ip}:8081"
-                if proof.get("runtime") != "runsc" or proof.get("vpc_ip") != sandbox_ip or proof.get("target") != "healthy" or proof.get("endpoint") != base_url:
+                expected_runtime = "microsandbox" if target_runtime == "microsandbox" else "runsc"
+                if proof.get("runtime") != expected_runtime or proof.get("vpc_ip") != sandbox_ip or proof.get("target") != "healthy" or proof.get("endpoint") != base_url:
                     raise ValueError("Target readiness proof does not match the provider VPC attachment")
                 await job.publish("running", "scanning")
                 report = await asyncio.to_thread(run_finder, base_url, str(source_dir))
@@ -553,6 +554,7 @@ async def run_sandbox_scan_job(job, target_name, signals):
             "instance_id": instance_id,
             "vpc_ip": sandbox_ip,
             "target": target_name,
+            "target_runtime": target_runtime,
             "endpoint": base_url,
             "endpoint_health": "healthy",
             "host": {field: proof[field] for field in ("hostname", "uname", "cpu_virt", "kvm_device", "kvm_access")},

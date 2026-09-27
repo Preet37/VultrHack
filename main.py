@@ -22,6 +22,7 @@ BOOTSTRAP_STAGES = frozenset({
     "bridge_inspect", "firewall_ipv4", "firewall_ipv6", "sandbox_create",
     "docker_isolation", "smoke_command", "external_probe", "dns_probe", "host_probe",
     "target_fetch", "target_build", "target_start", "target_health",
+    "microsandbox_install", "microsandbox_create",
     "ready_callback",
 })
 
@@ -29,6 +30,7 @@ BOOTSTRAP_STAGES = frozenset({
 class JobRequest(BaseModel):
     type: Literal["connectivity", "sandbox_smoke", "scan", "sandbox_scan"]
     approve_vm: StrictBool = False
+    target_runtime: Literal["gvisor", "microsandbox"] = "gvisor"
     netbird_setup_key: SecretStr | None = None
     arm_token: SecretStr | None = None
     diagnostic_upload: dict | None = None
@@ -297,11 +299,11 @@ async def start_job(request: JobRequest, authorization: str | None = Header(defa
         if not all(os.getenv(name) for name in ("CERBERUS_VPC_ID", "CERBERUS_CONTROL_INSTANCE_ID", "CERBERUS_CONTROL_VPC_IP", "CERBERUS_VPC_SUBNET")):
             raise HTTPException(status_code=503, detail="VPC sandbox jobs are not configured")
         if enabled:
-            job = job_registry.create(request.type, signals=ready_signals, target=request.target)
+            job = job_registry.create(request.type, signals=ready_signals, target=request.target, target_runtime=request.target_runtime)
         else:
             if job_registry.consume_sandbox_arm(request.arm_token.get_secret_value()) is None:
                 raise HTTPException(status_code=403, detail="Sandbox arm is invalid or expired")
-            job = job_registry.create(request.type, signals=ready_signals, target=request.target)
+            job = job_registry.create(request.type, signals=ready_signals, target=request.target, target_runtime=request.target_runtime)
     elif request.type == "scan":
         if request.approve_vm or request.netbird_setup_key is not None or request.arm_token is not None or request.diagnostic_upload is not None:
             raise HTTPException(status_code=400, detail="Scan jobs do not accept sandbox credentials")

@@ -778,6 +778,33 @@ def test_target_ready_proof_merges_the_verified_vpc_endpoint(monkeypatch, capsys
     assert merged == {**base_proof, "vpc_ip": "10.52.0.4", "target": "healthy", "endpoint": "http://10.52.0.4:8081"}
 
 
+def test_microsandbox_target_user_data_uses_kvm_microvm_not_docker():
+    from instance_lifecycle import MICROSANDBOX_INSTALLER_SHA256
+
+    script = docker_user_data(
+        "http://10.52.0.2:8001/internal/ready", "R" * 43,
+        vpc_callback=True, vpc_subnet="10.52.0.0/24",
+        target_run={**build_target_run(), "runtime": "microsandbox"},
+    )
+    assert len(base64.b64encode(script.encode())) < 16 * 1024
+    expanded = unpack_vpc_payload(script)
+    assert subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True).returncode == 0
+    assert subprocess.run(["sh", "-n"], input=expanded, text=True, capture_output=True).returncode == 0
+    assert "apt-get install -y docker.io" not in expanded
+    assert "runsc install" not in expanded
+    assert MICROSANDBOX_INSTALLER_SHA256 in expanded and "sha256sum -c -" in expanded
+    assert "msb doctor" in expanded
+    assert "msb create --name cerberus-target --replace --cpus 1 --memory 1024M" in expanded
+    assert '--copy-dir /root/target:/app' in expanded
+    assert '--port "$vpc_ip":8081:8081' in expanded and "--port 0.0.0.0" not in expanded
+    assert "iptables -I INPUT -p tcp -s 10.52.0.0/24 --dport 8081 -j ACCEPT" in expanded
+    assert "microsandbox_install" in expanded and "microsandbox_create" in expanded
+    assert "microsandbox_install" in BOOTSTRAP_STAGES and "microsandbox_create" in BOOTSTRAP_STAGES
+    assert '"runtime": "microsandbox"' not in expanded  # per-field, not a fixed literal blob
+    assert "proof['runtime'] = 'microsandbox'" in expanded
+    assert "account-key" not in expanded and "netbird up" not in expanded
+
+
 def test_target_run_keeps_the_presigned_nic_probe_within_budget():
     script = docker_user_data(
         "http://10.52.0.2:8001/internal/ready", "R" * 43,

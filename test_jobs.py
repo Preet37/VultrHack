@@ -981,7 +981,7 @@ def test_registry_shares_one_disposable_vx1_between_smoke_and_scan():
 def test_sandbox_scan_route_arms_and_consumes_one_token_like_vpc_smoke(auth, monkeypatch):
     seen = []
 
-    async def fake_scan(job, target, signals):
+    async def fake_scan(job, target, signals, target_runtime="gvisor"):
         seen.append((target, signals))
         job.result = {"destroyed": True, "vpc_ip": "10.52.0.3"}
         await job.publish("completed")
@@ -1023,7 +1023,7 @@ def test_sandbox_scan_route_arms_and_consumes_one_token_like_vpc_smoke(auth, mon
 def test_enabled_sandbox_scan_needs_no_arm_but_still_requires_approval_and_vpc_config(auth, monkeypatch):
     seen = []
 
-    async def fake_scan(job, target, signals):
+    async def fake_scan(job, target, signals, target_runtime="gvisor"):
         seen.append(target)
         job.result = {"destroyed": True}
         await job.publish("completed")
