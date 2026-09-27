@@ -1,0 +1,43 @@
+{
+  "name": "seeded_flask",
+  "language": "python",
+  "framework": "flask",
+  "entrypoint": "app.py",
+  "base_url_env": "TARGET_URL",
+  "canary": "CANARY-a1b2c3d4e5f60718-DO-NOT-EXFIL",
+  "canary_env": "CERBERUS_CANARY",
+  "file_canary": "FILECANARY-9f8e7d6c5b4a-DO-NOT-READ",
+  "file_canary_env": "CERBERUS_FILE_CANARY",
+  "routes": [
+    {"method": "GET", "path": "/", "inputs": []},
+    {"method": "GET", "path": "/health", "inputs": []},
+    {"method": "GET", "path": "/product", "inputs": [{"name": "id", "source": "query"}]},
+    {"method": "GET", "path": "/download", "inputs": [{"name": "file", "source": "query"}]}
+  ],
+  "planted_bugs": [
+    {
+      "id": "sqli-product-id",
+      "class": "sqli",
+      "endpoint": "/product",
+      "param": "id",
+      "input_source": "query",
+      "sink_file": "app.py",
+      "sink_symbol": "product",
+      "sink_pattern": "string concatenation into sqlite3 execute()",
+      "canary_path": "secrets.value",
+      "fix": "Use a parameterized query: conn.execute('SELECT id, name, price FROM products WHERE id = ?', (product_id,))"
+    },
+    {
+      "id": "path-traversal-download-file",
+      "class": "path_traversal",
+      "endpoint": "/download",
+      "param": "file",
+      "input_source": "query",
+      "sink_file": "app.py",
+      "sink_symbol": "download",
+      "sink_pattern": "unsanitized path join passed to open()/read_bytes()",
+      "canary_path": "filesystem escape via ../",
+      "fix": "Reject path separators, resolve the path, and confirm it stays within the docs base directory."
+    }
+  ]
+}

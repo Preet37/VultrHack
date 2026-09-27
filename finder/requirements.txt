@@ -1,0 +1,5 @@
+# Finder runtime deps (control-plane side). Confirmers use httpx; the target
+# app (targets/seeded_flask) brings its own Flask. Optional external tools
+# (semgrep, sqlmap, nuclei, ZAP) are used only when present in the sandbox.
+httpx==0.28.1
+python-dotenv==1.2.1
