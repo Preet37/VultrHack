@@ -111,7 +111,7 @@ def target_run_user_data(source_url, entrypoint, vpc_subnet):
         "FROM python:3.12-slim\n"
         "WORKDIR /app\n"
         "COPY . /app\n"
-        "RUN if [ -f requirements.txt ]; then pip install --no-cache-dir --disable-pip-version-check -r requirements.txt; fi\n"
+        "RUN pip install --no-cache-dir --disable-pip-version-check -r requirements.txt && python -c 'import flask'\n"
         f"ENV PORT={port} PYTHONPATH=/app\n"
         f"EXPOSE {port}\n"
         f'ENTRYPOINT ["python", "{entrypoint}"]\n'
