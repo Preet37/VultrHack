@@ -96,15 +96,28 @@ class ControlPlaneInstances(VultrInstances):
         label = f"cerberus-control-{uuid4().hex[:12]}"
         return await self.create_with_user_data(region, plan, os_id, label, ["cerberus", "cerberus-control"], script, (ready_token, setup_key))
 
-    async def clear_bootstrap_data(self, instance_id):
+    async def clear_bootstrap_data(self, instance_id, timeout=300, interval=5):
         safe_data = base64.b64encode(b"#!/bin/sh\ntrue\n").decode()
         url = f"{API_URL}/{instance_id}"
-        response = await self.client.patch(url, headers=self.headers, json={"user_data": safe_data})
-        response.raise_for_status()
-        verified = await self.client.get(f"{url}/user-data", headers=self.headers)
-        verified.raise_for_status()
-        if verified.json()["user_data"]["data"] != safe_data:
-            raise RuntimeError("Control-plane bootstrap user-data was not cleared")
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            response = await self.client.patch(url, headers=self.headers, json={"user_data": safe_data})
+            if response.status_code != 409:
+                response.raise_for_status()
+                break
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TimeoutError(f"Control-plane user-data could not be cleared for {instance_id}")
+            await asyncio.sleep(min(interval, remaining))
+        while True:
+            verified = await self.client.get(f"{url}/user-data", headers=self.headers)
+            verified.raise_for_status()
+            if verified.json()["user_data"]["data"] == safe_data:
+                return
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TimeoutError(f"Control-plane user-data clearing could not be verified for {instance_id}")
+            await asyncio.sleep(min(interval, remaining))
 
 
 def render_control_env(api_key, inference_key, api_token, region="ord", plan=DEFAULT_VX1_PLAN):

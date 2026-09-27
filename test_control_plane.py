@@ -89,6 +89,27 @@ def test_control_bootstrap_metadata_is_replaced_after_enrollment():
     assert requests[1].url.path == "/v2/instances/control-123/user-data"
 
 
+def test_control_bootstrap_scrub_retries_conflict_and_stale_metadata():
+    methods = []
+    safe_data = base64.b64encode(b"#!/bin/sh\ntrue\n").decode()
+
+    def respond(request):
+        methods.append(request.method)
+        if request.method == "PATCH" and methods.count("PATCH") == 1:
+            return httpx.Response(409, json={"error": "Instance installing"})
+        if request.method == "PATCH":
+            return httpx.Response(200)
+        value = "old-user-data" if methods.count("GET") == 1 else safe_data
+        return httpx.Response(200, json={"user_data": {"data": value}})
+
+    async def request():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            await ControlPlaneInstances(client, "account-key").clear_bootstrap_data("control-123", interval=0)
+
+    asyncio.run(request())
+    assert methods == ["PATCH", "PATCH", "GET", "GET"]
+
+
 def test_control_api_token_cannot_reuse_vultr_credentials():
     with pytest.raises(ValueError):
         render_control_env("A" * 36, "I" * 36, "A" * 36)
