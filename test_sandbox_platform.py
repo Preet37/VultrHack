@@ -411,8 +411,10 @@ def test_generated_smoke_proof_requires_denials_and_host_counter(test_net_exit, 
 def test_private_sandbox_bootstrap_stays_within_conservative_user_data_budget(address, subnet):
     script = docker_user_data("http://100.124.55.15:8000/internal/ready", "R" * 36, True, "A" * 36, True)
     vpc_script = docker_user_data(f"http://{address}:8001/internal/ready", "R" * 43, True, vpc_callback=True, vpc_subnet=subnet)
+    diagnostic_script = docker_user_data(f"http://{address}:8001/internal/ready", "R" * 43, True, vpc_callback=True, vpc_subnet=subnet, diagnostic_url="https://" + "a" * 63 + ".trycloudflare.com/internal/nic", diagnostic_token="D" * 128)
     assert len(base64.b64encode(script.encode())) < 16 * 1024
     assert len(base64.b64encode(vpc_script.encode())) < 16 * 1024
+    assert len(base64.b64encode(diagnostic_script.encode())) < 16 * 1024
 
 
 def test_vpc_bootstrap_embedded_python_is_valid_and_excludes_netbird_enrolment():

@@ -102,7 +102,7 @@ class JobRegistry:
         self.arm_hold_seconds = 0
         return hold
 
-    def create(self, kind="connectivity", setup_key=None, signals=None, vpc_mode=False, target=None, diagnostic_hold_seconds=None):
+    def create(self, kind="connectivity", setup_key=None, signals=None, vpc_mode=False, target=None, diagnostic_hold_seconds=None, diagnostic_url=None, diagnostic_token=None):
         if kind not in ("connectivity", "sandbox_smoke", "scan"):
             raise ValueError("Unsupported job type")
         if kind == "sandbox_smoke":
@@ -129,6 +129,8 @@ class JobRegistry:
             worker = run_scan_job(job, target)
         elif vpc_mode:
             options = {"diagnostic_hold_seconds": diagnostic_hold_seconds} if diagnostic_hold_seconds is not None else {}
+            if diagnostic_url is not None:
+                options.update(diagnostic_url=diagnostic_url, diagnostic_token=diagnostic_token)
             worker = run_sandbox_smoke_job(job, setup_key, signals, vpc_mode=True, **options)
         else:
             worker = run_sandbox_smoke_job(job, setup_key, signals)
@@ -238,7 +240,7 @@ async def run_scan_job(job, target_name):
         await asyncio.to_thread(runner.stop)
 
 
-async def run_sandbox_smoke_job(job, setup_key, signals, vpc_mode=False, diagnostic_hold_seconds=None):
+async def run_sandbox_smoke_job(job, setup_key, signals, vpc_mode=False, diagnostic_hold_seconds=None, diagnostic_url=None, diagnostic_token=None):
     from instance_lifecycle import DEFAULT_VX1_PLAN, VultrInstances, temporary_instance, validated_vpc_id, validated_vpc_subnet
     from sandbox_platform import HOST_PROBE_LOG_PREFIX, PROBE_PORT, VPC_INTERNAL_SUBNET, check_private_endpoint
 
@@ -288,6 +290,8 @@ async def run_sandbox_smoke_job(job, setup_key, signals, vpc_mode=False, diagnos
                     raise ValueError("Private VPC callback listener is unavailable")
                 callback = f"http://{control_ip}:8001/internal/ready"
                 vpc_options = {"vpc_callback": True, "vpc_subnet": str(subnet), "vpc_id": vpc_id}
+                if diagnostic_url is not None:
+                    vpc_options.update(diagnostic_url=diagnostic_url, diagnostic_token=diagnostic_token)
             else:
                 callback = f"http://{address}:8000/internal/ready"
                 vpc_options = {}

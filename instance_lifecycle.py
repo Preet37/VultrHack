@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import shlex
+import zlib
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -35,12 +36,41 @@ def validated_vpc_subnet(value):
     return subnet
 
 
-def block_public_ssh_user_data(stage_url=None, ready_token=None):
+def validated_diagnostic_url(value):
+    try:
+        url = urlsplit(value)
+        host = url.hostname
+        port = url.port
+    except (TypeError, ValueError):
+        raise ValueError("Public diagnostic URL is invalid") from None
+    suffix = ".trycloudflare.com"
+    if (
+        url.scheme != "https" or not host or url.netloc != host or url.geturl() != value or not host.endswith(suffix)
+        or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", host[:-len(suffix)])
+        or port is not None or url.path != "/internal/nic" or url.query or url.fragment
+    ):
+        raise ValueError("Public diagnostic URL must be a bounded HTTPS Quick Tunnel endpoint")
+    return value
+
+
+def block_public_ssh_user_data(stage_url=None, ready_token=None, diagnostic_url=None, diagnostic_token=None, vpc_subnet=None):
     progress = (
         "import urllib.request as u\n"
         f"try:u.urlopen(u.Request({stage_url!r},b'{{\"stage\":\"bootstrap_started\"}}',{{'Authorization':{'Bearer ' + ready_token!r},'Content-Type':'application/json'}}),timeout=5).close()\n"
         "except Exception:pass\n"
     ) if stage_url is not None else ""
+    diagnostic = (
+        "import ipaddress,json\n"
+        "try:\n"
+        "    interfaces=json.loads(subprocess.check_output(['ip','-j','-4','addr'],timeout=3))\n"
+        f"    subnet=ipaddress.ip_network({vpc_subnet!r})\n"
+        "    ips=[a['local'] for i in interfaces if i.get('ifname')!='lo' for a in i.get('addr_info',[]) if a.get('family')=='inet' and ipaddress.ip_address(a['local']) in subnet]\n"
+        "    report={'probe':'ok','vpc_ip':ips[0] if len(ips)==1 else None} if len(ips)<=1 else {'probe':'unavailable','vpc_ip':None}\n"
+        "except Exception:report={'probe':'unavailable','vpc_ip':None}\n"
+        "try:\n"
+        f"    u.urlopen(u.Request({diagnostic_url!r},json.dumps(report).encode(),{{'Authorization':{'Bearer ' + diagnostic_token!r},'Content-Type':'application/json'}}),timeout=5).close()\n"
+        "except Exception:pass\n"
+    ) if diagnostic_url is not None else ""
     return (
         "systemctl stop ssh.socket ssh.service\n"
         "systemctl mask ssh.socket ssh.service\n"
@@ -49,7 +79,7 @@ def block_public_ssh_user_data(stage_url=None, ready_token=None):
         "listeners = subprocess.check_output(['ss', '-ltnH'], text=True).splitlines()\n"
         "if any(line.split()[3].rsplit(':', 1)[-1] == '22' for line in listeners):\n"
         "    raise SystemExit('OpenSSH port 22 remains listening')\n"
-        f"{progress}"
+        f"{progress}{diagnostic}"
         "PY\n"
     )
 
@@ -95,7 +125,11 @@ class ReadySignals:
         self._stages.pop(token, None)
 
 
-def docker_user_data(callback_url, ready_token, opensandbox_spike=False, netbird_setup_key=None, private_callback=False, vpc_callback=False, vpc_subnet=None):
+def docker_user_data(callback_url, ready_token, opensandbox_spike=False, netbird_setup_key=None, private_callback=False, vpc_callback=False, vpc_subnet=None, diagnostic_url=None, diagnostic_token=None):
+    if diagnostic_url is not None or diagnostic_token is not None:
+        if not vpc_callback or not diagnostic_url or not isinstance(diagnostic_token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", diagnostic_token) or diagnostic_token == ready_token:
+            raise ValueError("Public diagnostic callback requires a separate per-run token")
+        validated_diagnostic_url(diagnostic_url)
     if netbird_setup_key is not None and not opensandbox_spike:
         raise ValueError("NetBird enrollment requires the authenticated OpenSandbox spike")
     url = urlsplit(callback_url)
@@ -127,7 +161,7 @@ def docker_user_data(callback_url, ready_token, opensandbox_spike=False, netbird
     script = (
         "#!/bin/sh\n"
         "set -eu\n"
-        f"{block_public_ssh_user_data(callback_url.replace('/internal/ready', '/internal/stage') if vpc_callback else None, ready_token if vpc_callback else None)}"
+        f"{block_public_ssh_user_data(callback_url.replace('/internal/ready', '/internal/stage') if vpc_callback else None, ready_token if vpc_callback else None, diagnostic_url, diagnostic_token, vpc_subnet if diagnostic_url else None)}"
         "test -c /dev/kvm\n"
         "test -r /dev/kvm\n"
         "test -w /dev/kvm\n"
@@ -195,11 +229,18 @@ def docker_user_data(callback_url, ready_token, opensandbox_spike=False, netbird
         script += opensandbox_spike_user_data(netbird=netbird_setup_key is not None, report_stages=private_callback or vpc_callback, vpc_subnet=vpc_subnet if vpc_callback else None)
     callback_stage = "cerberus_report_stage ready_callback\n" if private_callback or vpc_callback else ""
     auth_header = '"$CERBERUS_AUTH_HEADER"' if private_callback or vpc_callback else shlex.quote(f"Authorization: Bearer {ready_token}")
-    return script + callback_stage + (
+    script += callback_stage + (
         f"curl -fsS --retry 12 --retry-delay 5 --max-time 15 -X POST "
         f"-H {auth_header} -H 'Content-Type: application/json' "
         f"--data-binary \"$proof\" {shlex.quote(callback_url)}\n"
     )
+    if diagnostic_url is not None:
+        marker = "apt-get install -y docker.io\n"
+        head, tail = script.split(marker, 1)
+        compressed = base64.b64encode(zlib.compress((marker + tail).encode(), level=9)).decode()
+        decode = "import base64,sys,zlib;sys.stdout.buffer.write(zlib.decompress(base64.b64decode(sys.argv[1])))"
+        return head + f"vpc_payload=$(python3 -c {shlex.quote(decode)} {compressed}) && eval \"$vpc_payload\"\n"
+    return script
 
 
 class VultrInstances:
@@ -207,11 +248,11 @@ class VultrInstances:
         self.client = client
         self.headers = {"Authorization": f"Bearer {api_key}"}
 
-    async def create(self, region, plan, os_id, callback_url, ready_token, opensandbox_spike=False, netbird_setup_key=None, private_callback=False, vpc_callback=False, vpc_subnet=None, vpc_id=None):
-        script = docker_user_data(callback_url, ready_token, opensandbox_spike, netbird_setup_key, private_callback, vpc_callback, vpc_subnet)
+    async def create(self, region, plan, os_id, callback_url, ready_token, opensandbox_spike=False, netbird_setup_key=None, private_callback=False, vpc_callback=False, vpc_subnet=None, vpc_id=None, diagnostic_url=None, diagnostic_token=None):
+        script = docker_user_data(callback_url, ready_token, opensandbox_spike, netbird_setup_key, private_callback, vpc_callback, vpc_subnet, diagnostic_url, diagnostic_token)
         return await self.create_with_user_data(
             region, plan, os_id, f"cerberus-{uuid4().hex[:12]}", ["cerberus"], script,
-            (ready_token, netbird_setup_key), vpc_ids=[vpc_id] if vpc_callback else None,
+            (ready_token, netbird_setup_key, diagnostic_token), vpc_ids=[vpc_id] if vpc_callback else None,
         )
 
     async def create_with_user_data(self, region, plan, os_id, label, tags, script, secrets_to_redact=(), vpc_ids=None):
@@ -341,8 +382,10 @@ class VultrInstances:
 
 
 @asynccontextmanager
-async def temporary_instance(api, region, plan, os_id, callback_url, ready_token, opensandbox_spike=False, netbird_setup_key=None, private_callback=False, vpc_callback=False, vpc_subnet=None, vpc_id=None):
+async def temporary_instance(api, region, plan, os_id, callback_url, ready_token, opensandbox_spike=False, netbird_setup_key=None, private_callback=False, vpc_callback=False, vpc_subnet=None, vpc_id=None, diagnostic_url=None, diagnostic_token=None):
     vpc_options = {"vpc_callback": True, "vpc_subnet": vpc_subnet, "vpc_id": vpc_id} if vpc_callback else {}
+    if diagnostic_url is not None:
+        vpc_options.update(diagnostic_url=diagnostic_url, diagnostic_token=diagnostic_token)
     instance_id = await api.create(region, plan, os_id, callback_url, ready_token, opensandbox_spike, netbird_setup_key, private_callback, **vpc_options)
     try:
         yield instance_id
