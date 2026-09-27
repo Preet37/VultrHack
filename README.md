@@ -49,6 +49,12 @@ cerberus-os-drop IN=br-56c2c6d718aa OUT= MAC=d6:4b:07:61:f7:b8:a6:ce:e0:df:8f:2d
 
 This proves **that controlled host-bound probe** was blocked; it is not a general guarantee for arbitrary repositories, a signed receipt, or validation of Vultr's still-unexplained firewall-group behavior. Jobs and event history remain in memory and can disappear on control-service restart. Every new live test requires a fresh one-off ephemeral `cerberus-sandbox` key, the narrow `cerberus-sandbox` → `cerberus-control` TCP/8000 readiness policy plus control → sandbox TCP/8080, and approval for that specific billable create-and-delete action. Do not run untrusted repository code until broader containment is designed and verified.
 
+## Broader network hardening (offline only)
+
+The next disposable-host bootstrap now fails closed unless Docker reports version **26 or newer** (which includes the [internal-network DNS forwarding fix](https://github.com/moby/moby/discussions/47601)), gVisor is the default runtime, the dedicated bridge is internal with **IPv6 disabled** and all published ports bind to localhost. Host `iptables` guards scoped to that bridge cover new host-bound IPv4 connections and IPv4 forwarding away from the bridge; `ip6tables` guards cover IPv6 host-bound and forwarded packets. The sandbox smoke also requires `nslookup example.com` to fail and verifies **exactly one** running container on the dedicated bridge. The guard is installed before sandbox creation, and the cloud-init payload remains bounded below a conservative 16 KiB test budget.
+
+**These additions have not been tested on a live VX1.** The earlier live kernel log proved only the controlled IPv4 host-gateway drop. A Docker `--internal` bridge permits traffic among containers on that same bridge; this prototype refuses an additional container rather than claiming lateral isolation. The DNS result plus Docker version check are defensive indicators, not a packet-level audit of every DNS path. IPv6 rules and IPv4 FORWARD guards are unverified on Vultr's Docker/kernel combination; a fresh operator-approved disposable VM is needed to test them. No untrusted repositories should run until the remaining paths are validated, and the Vultr firewall-group anomaly must not be treated as containment.
+
 ## Verification workflow (planned)
 
 1. Prepare a disposable host and run a controlled repository check in a target container.

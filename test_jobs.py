@@ -181,8 +181,8 @@ def test_registry_refuses_to_start_when_active_jobs_fill_capacity():
     assert registry.create() is None
 
 
-@pytest.mark.parametrize("readiness_fails,missing_log", [(False, False), (False, True), (True, False)])
-def test_sandbox_worker_proves_private_path_and_cleans_up(monkeypatch, readiness_fails, missing_log):
+@pytest.mark.parametrize("readiness_fails,missing_log,dns_exit", [(False, False, 1), (False, True, 1), (True, False, 1), (False, False, 0)])
+def test_sandbox_worker_proves_private_path_and_cleans_up(monkeypatch, readiness_fails, missing_log, dns_exit):
     calls = []
     destroyed = False
     proof = {
@@ -194,6 +194,7 @@ def test_sandbox_worker_proves_private_path_and_cleans_up(monkeypatch, readiness
             "network_id": "a" * 64, "bridge": "br-aaaaaaaaaaaa", "gateway": "172.23.0.1",
             "unexpected": "secret-in-proof",
             "test_net_1": {"destination": "192.0.2.1:65000", "exit_code": 1},
+            "dns_external": {"destination": "example.com", "exit_code": dns_exit},
             "host_gateway": {"destination": "172.23.0.1:65000", "exit_code": 1},
             "host_drop_packets_before": 0, "host_drop_packets_after": 1, "host_drop_packets_delta": 1,
             "kernel_drop_log": None if missing_log else "cerberus-os-drop IN=br-aaaaaaaaaaaa OUT= DST=172.23.0.1 DPT=65000",
@@ -244,9 +245,9 @@ def test_sandbox_worker_proves_private_path_and_cleans_up(monkeypatch, readiness
     assert destroyed and signals.unregistered
     assert ("DELETE", "/v2/instances/instance-123") in calls
     assert calls[-1] == ("GET", "/v2/instances/instance-123")
-    assert job.status == ("failed" if readiness_fails or missing_log else "completed")
+    assert job.status == ("failed" if readiness_fails or missing_log or dns_exit == 0 else "completed")
     assert "A" * 36 not in str(job.error) + str(job.events)
-    if not readiness_fails and not missing_log:
+    if not readiness_fails and not missing_log and dns_exit != 0:
         assert job.result["destroyed"] is True
         assert job.result["opensandbox"]["exit_code"] == 0
         assert "A" * 36 not in str(job.result) + str(job.events)

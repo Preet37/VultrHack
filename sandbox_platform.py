@@ -14,16 +14,24 @@ HOST_BIND_OPTION = "com.docker.network.bridge.host_binding_ipv4"
 BRIDGE_NAME_OPTION = "com.docker.network.bridge.name"
 HOST_PROBE_CHAIN = "CERBERUS_OS_HOST"
 HOST_PROBE_LOG_PREFIX = "cerberus-os-drop "
+FORWARD_PROBE_CHAIN = "CERBERUS_OS_FWD"
+FORWARD_PROBE_LOG_PREFIX = "cerberus-fwd-drop "
+IPV6_HOST_CHAIN = "CERBERUS_OS_HOST6"
+IPV6_FORWARD_CHAIN = "CERBERUS_OS_FWD6"
 PROBE_PORT = 65000
 
 
 def build_opensandbox_config(docker_info, network, netbird_status=None):
     if docker_info.get("DefaultRuntime") != "runsc" or "runsc" not in docker_info.get("Runtimes", {}):
         raise ValueError("Docker must have gVisor runsc installed as its default runtime")
+    version = re.match(r"^(\d+)\.(\d+)(?:\.|$)", str(docker_info.get("ServerVersion", "")))
+    if version is None or (int(version[1]), int(version[2])) < (26, 0):
+        raise ValueError("Docker 26 or newer is required for internal network DNS isolation")
     if (
         network.get("Name") != INTERNAL_NETWORK
         or network.get("Internal") is not True
         or network.get("Driver") != "bridge"
+        or network.get("EnableIPv6") is not False
         or (network.get("Options") or {}).get(HOST_BIND_OPTION) != "127.0.0.1"
     ):
         raise ValueError("OpenSandbox requires an internal Docker bridge with localhost-only published ports")
@@ -76,8 +84,9 @@ def verified_probe_bridge(network, links, addresses):
         network.get("Name") != INTERNAL_NETWORK
         or network.get("Internal") is not True
         or network.get("Driver") != "bridge"
+        or network.get("EnableIPv6") is not False
     ):
-        raise ValueError("Host probe requires the dedicated internal Docker bridge")
+        raise ValueError("Host probe requires the dedicated internal Docker bridge without IPv6")
     options = network.get("Options") or {}
     network_id = network.get("Id")
     if (
@@ -132,6 +141,30 @@ def install_host_drop_probe(bridge):
     subprocess.run(base + ["-I", "INPUT", "1", "-i", bridge, "-j", HOST_PROBE_CHAIN], check=True)
     subprocess.run(base + ["-C", "INPUT", "-i", bridge, "-j", HOST_PROBE_CHAIN], check=True)
     subprocess.run(base + ["-C", HOST_PROBE_CHAIN, "-j", "DROP"], check=True)
+
+
+def install_forward_drop_probe(bridge):
+    base = ["iptables", "-w", "-t", "filter"]
+    subprocess.run(base + ["-N", FORWARD_PROBE_CHAIN], check=True)
+    subprocess.run(base + ["-A", FORWARD_PROBE_CHAIN, "-m", "limit", "--limit", "2/second", "--limit-burst", "4", "-j", "LOG", "--log-prefix", FORWARD_PROBE_LOG_PREFIX], check=True)
+    subprocess.run(base + ["-A", FORWARD_PROBE_CHAIN, "-j", "DROP"], check=True)
+    subprocess.run(base + ["-I", "FORWARD", "1", "-i", bridge, "!", "-o", bridge, "-j", FORWARD_PROBE_CHAIN], check=True)
+    subprocess.run(base + ["-C", "FORWARD", "-i", bridge, "!", "-o", bridge, "-j", FORWARD_PROBE_CHAIN], check=True)
+    subprocess.run(base + ["-C", FORWARD_PROBE_CHAIN, "-j", "DROP"], check=True)
+
+
+def install_ipv6_drop_probe(bridge):
+    base = ["ip6tables", "-w", "-t", "filter"]
+    for chain, hook, match, prefix in (
+        (IPV6_HOST_CHAIN, "INPUT", ["-i", bridge], "cerberus-os6-drop "),
+        (IPV6_FORWARD_CHAIN, "FORWARD", ["-i", bridge, "!", "-o", bridge], "cerberus-fwd6-drop "),
+    ):
+        subprocess.run(base + ["-N", chain], check=True)
+        subprocess.run(base + ["-A", chain, "-m", "limit", "--limit", "2/second", "--limit-burst", "4", "-j", "LOG", "--log-prefix", prefix], check=True)
+        subprocess.run(base + ["-A", chain, "-j", "DROP"], check=True)
+        subprocess.run(base + ["-I", hook, "1", *match, "-j", chain], check=True)
+        subprocess.run(base + ["-C", hook, *match, "-j", chain], check=True)
+        subprocess.run(base + ["-C", chain, "-j", "DROP"], check=True)
 
 
 def host_drop_packets():
@@ -207,21 +240,23 @@ def opensandbox_spike_user_data(netbird=False):
         "import ipaddress\nimport json\nimport re\nimport secrets\nimport socket\nimport subprocess\n"
         f"INTERNAL_NETWORK = {INTERNAL_NETWORK!r}\nHOST_BIND_OPTION = {HOST_BIND_OPTION!r}\n"
         f"BRIDGE_NAME_OPTION = {BRIDGE_NAME_OPTION!r}\nHOST_PROBE_CHAIN = {HOST_PROBE_CHAIN!r}\n"
-        f"HOST_PROBE_LOG_PREFIX = {HOST_PROBE_LOG_PREFIX!r}\nPROBE_PORT = {PROBE_PORT!r}\n\n"
+        f"HOST_PROBE_LOG_PREFIX = {HOST_PROBE_LOG_PREFIX!r}\nFORWARD_PROBE_CHAIN = {FORWARD_PROBE_CHAIN!r}\n"
+        f"FORWARD_PROBE_LOG_PREFIX = {FORWARD_PROBE_LOG_PREFIX!r}\nIPV6_HOST_CHAIN = {IPV6_HOST_CHAIN!r}\n"
+        f"IPV6_FORWARD_CHAIN = {IPV6_FORWARD_CHAIN!r}\nPROBE_PORT = {PROBE_PORT!r}\n\n"
         + "\n".join(inspect.getsource(function) for function in (
             build_opensandbox_config, verified_probe_bridge, assert_closed_probe_port, install_host_drop_probe,
-            host_drop_packets, recent_host_drop_log,
+            install_forward_drop_probe, install_ipv6_drop_probe, host_drop_packets, recent_host_drop_log,
         ))
     )
     source = base64.b64encode(zlib.compress(source.encode(), level=9)).decode()
     status_line = "status = json.loads(subprocess.check_output(['netbird', 'status', '--json']))\n" if netbird else ""
     proof_line = 'data["netbird_ip"] = tomllib.loads(Path("/root/.sandbox.toml").read_text())["server"]["host"]; ' if netbird else ""
-    return (
+    script = (
         f"printf '%s' {shlex.quote(source)} | base64 -d | python3 -c 'import sys,zlib; sys.stdout.buffer.write(zlib.decompress(sys.stdin.buffer.read()))' > /root/sandbox_platform.py\n"
         "apt-get install -y python3-venv iptables iproute2\n"
         "python3 -m venv /root/opensandbox-venv\n"
         "/root/opensandbox-venv/bin/pip install --disable-pip-version-check --no-input opensandbox-server==0.2.3 opensandbox==0.1.16\n"
-        "docker network create --internal --driver bridge --opt com.docker.network.bridge.host_binding_ipv4=127.0.0.1 cerberus-internal\n"
+        "docker network create --internal --ipv6=false --driver bridge --opt com.docker.network.bridge.host_binding_ipv4=127.0.0.1 cerberus-internal\n"
         "docker pull opensandbox/execd:v1.0.22\n"
         "PYTHONPATH=/root python3 - <<'PY'\n"
         "import json\n"
@@ -255,7 +290,7 @@ def opensandbox_spike_user_data(netbird=False):
         "sys.path.insert(0, '/root')\n"
         "from opensandbox import Sandbox\n"
         "from opensandbox.config import ConnectionConfig\n"
-        "from sandbox_platform import verified_probe_bridge, assert_closed_probe_port, install_host_drop_probe, host_drop_packets, recent_host_drop_log\n"
+        "from sandbox_platform import verified_probe_bridge, assert_closed_probe_port, install_host_drop_probe, install_forward_drop_probe, install_ipv6_drop_probe, host_drop_packets, recent_host_drop_log\n"
         "async def check():\n"
         "    key = Path('/root/.opensandbox-key').read_text()\n"
         "    domain = tomllib.loads(Path('/root/.sandbox.toml').read_text())['server']['host'] + ':8080'\n"
@@ -266,25 +301,27 @@ def opensandbox_spike_user_data(netbird=False):
         "    bridge, gateway = verified_probe_bridge(network, links, addresses)\n"
         "    assert_closed_probe_port(gateway)\n"
         "    install_host_drop_probe(bridge)\n"
+        "    install_forward_drop_probe(bridge)\n"
+        "    install_ipv6_drop_probe(bridge)\n"
         "    sandbox = await Sandbox.create('busybox:1.37.0', timeout=timedelta(minutes=2), connection_config=ConnectionConfig(domain=domain, api_key=key, use_server_proxy=True))\n"
         "    try:\n"
         "        containers = subprocess.check_output(['docker', 'ps', '-q'], text=True).split()\n"
         "        if not containers:\n"
         "            raise RuntimeError('OpenSandbox container was not found')\n"
-        "        attached = False\n"
+        "        attached = 0\n"
         "        for container_id in containers:\n"
         "            inspected = json.loads(subprocess.check_output(['docker', 'inspect', container_id], text=True))[0]\n"
         "            networks = inspected['NetworkSettings'].get('Networks') or {}\n"
         "            if 'cerberus-internal' in networks:\n"
         "                if set(networks) != {'cerberus-internal'} or networks['cerberus-internal'].get('NetworkID') != network['Id'] or inspected['HostConfig'].get('Runtime') not in (None, '', 'runsc'):\n"
         "                    raise RuntimeError('OpenSandbox container is not on the verified gVisor bridge')\n"
-        "                attached = True\n"
+        "                attached += 1\n"
         "            for bindings in (inspected['NetworkSettings'].get('Ports') or {}).values():\n"
         "                for binding in bindings or []:\n"
         "                    if binding['HostIp'] not in ('127.0.0.1', '::1'):\n"
         "                        raise RuntimeError('OpenSandbox published a port beyond loopback')\n"
-        "        if not attached:\n"
-        "            raise RuntimeError('OpenSandbox has no container on the verified bridge')\n"
+        "        if attached != 1:\n"
+        "            raise RuntimeError('OpenSandbox bridge must contain exactly one sandbox container')\n"
         "        result = await sandbox.commands.run('hostname; uname -a')\n"
         "        if result.exit_code != 0:\n"
         "            raise RuntimeError('OpenSandbox smoke command failed')\n"
@@ -294,6 +331,9 @@ def opensandbox_spike_user_data(netbird=False):
         f"        test_net = await sandbox.commands.run('nc -w 3 192.0.2.1 {PROBE_PORT}')\n"
         "        if not isinstance(test_net.exit_code, int) or test_net.exit_code == 0:\n"
         "            raise RuntimeError('TEST-NET-1 isolation probe did not fail')\n"
+        "        dns_probe = await sandbox.commands.run('nslookup example.com')\n"
+        "        if type(dns_probe.exit_code) is not int or dns_probe.exit_code == 0:\n"
+        "            raise RuntimeError('External DNS isolation probe did not fail')\n"
         "        before = host_drop_packets()\n"
         "        since = time.time()\n"
         f"        host_probe = await sandbox.commands.run(f'nc -w 3 {{gateway}} {PROBE_PORT}')\n"
@@ -302,6 +342,7 @@ def opensandbox_spike_user_data(netbird=False):
         "            raise RuntimeError('Host DROP isolation probe did not register a denied packet')\n"
         "        isolation = {'network_id': network['Id'], 'bridge': bridge, 'gateway': gateway,\n"
         f"                     'test_net_1': {{'destination': '192.0.2.1:{PROBE_PORT}', 'exit_code': test_net.exit_code}},\n"
+        "                     'dns_external': {'destination': 'example.com', 'exit_code': dns_probe.exit_code},\n"
         f"                     'host_gateway': {{'destination': f'{{gateway}}:{PROBE_PORT}', 'exit_code': host_probe.exit_code}},\n"
         "                     'host_drop_packets_before': before, 'host_drop_packets_after': after,\n"
         "                     'host_drop_packets_delta': after - before,\n"
@@ -314,3 +355,7 @@ def opensandbox_spike_user_data(netbird=False):
         "export CERBERUS_PROOF=\"$proof\"\n"
         f"proof=$(python3 -c 'import json,os,tomllib; from pathlib import Path; data=json.loads(os.environ[\"CERBERUS_PROOF\"]); data[\"opensandbox\"]=json.loads(Path(\"/root/opensandbox-proof.json\").read_text()); {proof_line}print(json.dumps(data))')\n"
     )
+    prefix, rest = script.split("/root/opensandbox-venv/bin/python3 - <<'PY'\n", 1)
+    smoke, tail = rest.split("\nPY\n", 1)
+    payload = base64.b64encode(zlib.compress(smoke.encode(), level=9)).decode()
+    return prefix + f"printf '%s' {shlex.quote(payload)} | base64 -d | /root/opensandbox-venv/bin/python3 -c 'import sys,zlib; exec(zlib.decompress(sys.stdin.buffer.read()))'\n" + tail

@@ -15,16 +15,22 @@ import pytest
 from instance_lifecycle import docker_user_data
 from sandbox_platform import (
     assert_closed_probe_port, build_opensandbox_config, check_private_endpoint, host_drop_packets,
-    install_host_drop_probe, netbird_enrollment_user_data, opensandbox_spike_user_data,
+    install_forward_drop_probe, install_host_drop_probe, install_ipv6_drop_probe, netbird_enrollment_user_data, opensandbox_spike_user_data,
     recent_host_drop_log, verified_probe_bridge,
 )
 
 
 def host_state():
-    return {"DefaultRuntime": "runsc", "Runtimes": {"runsc": {}}}, {
-        "Name": "cerberus-internal", "Internal": True, "Driver": "bridge",
+    return {"DefaultRuntime": "runsc", "Runtimes": {"runsc": {}}, "ServerVersion": "28.5.1"}, {
+        "Name": "cerberus-internal", "Internal": True, "Driver": "bridge", "EnableIPv6": False,
         "Options": {"com.docker.network.bridge.host_binding_ipv4": "127.0.0.1"},
     }
+
+
+def embedded_smoke_source(script):
+    marker = " | base64 -d | /root/opensandbox-venv/bin/python3 -c 'import sys,zlib; exec(zlib.decompress(sys.stdin.buffer.read()))'"
+    encoded = script.split(marker, 1)[0].rsplit("printf '%s' ", 1)[1]
+    return zlib.decompress(base64.b64decode(encoded)).decode()
 
 
 def probe_state():
@@ -34,6 +40,12 @@ def probe_state():
     links = [{"ifname": bridge, "linkinfo": {"info_kind": "bridge"}}]
     addresses = [{"ifname": bridge, "addr_info": [{"family": "inet", "local": "172.23.0.1", "prefixlen": 16}]}]
     return network, links, addresses
+
+
+def test_docker_without_internal_dns_forwarding_fix_is_rejected():
+    docker_info, network = host_state()
+    with pytest.raises(ValueError, match="Docker 26"):
+        build_opensandbox_config({**docker_info, "ServerVersion": "25.0.5"}, network)
 
 
 def test_config_is_authenticated_and_confined_to_gvisor_internal_network():
@@ -56,6 +68,7 @@ def test_config_is_authenticated_and_confined_to_gvisor_internal_network():
     (host_state()[0], {"Name": "cerberus-internal", "Internal": False, "Driver": "bridge"}),
     (host_state()[0], {"Name": "cerberus-internal", "Internal": True, "Driver": "bridge"}),
     (host_state()[0], {"Name": "cerberus-internal", "Internal": True, "Driver": "bridge", "Options": {"com.docker.network.bridge.host_binding_ipv4": "0.0.0.0"}}),
+    (host_state()[0], {**host_state()[1], "EnableIPv6": True}),
 ])
 def test_insecure_runtime_or_network_is_rejected(docker_info, network):
     with pytest.raises(ValueError, match="gVisor|internal"):
@@ -66,30 +79,34 @@ def test_spike_bootstrap_is_local_only_pinned_and_syntactically_valid():
     script = docker_user_data("https://cerberus.example/internal/ready", "ready-token", opensandbox_spike=True)
     assert "opensandbox-server==0.2.3" in script
     assert "opensandbox==0.1.16" in script
-    assert "docker network create --internal --driver bridge --opt com.docker.network.bridge.host_binding_ipv4=127.0.0.1 cerberus-internal" in script
+    assert "docker network create --internal --ipv6=false --driver bridge --opt com.docker.network.bridge.host_binding_ipv4=127.0.0.1 cerberus-internal" in script
     assert "sandbox_platform.py" in script
     assert "build_opensandbox_config" in script
     assert "os.umask(0o077)" in script
     assert '"http://$server_host:8080/health"' in script
-    assert "sandbox.commands.run('hostname; uname -a')" in script
-    assert "sandbox.commands.run('nc -w 3 192.0.2.1 65000')" in script
-    assert "sandbox.commands.run(f'nc -w 3 {gateway} 65000')" in script
-    assert script.index("assert_closed_probe_port(gateway)") < script.index("install_host_drop_probe(bridge)") < script.index("sandbox = await Sandbox.create")
-    assert "after <= before" in script
-    assert "'host_drop_packets_delta': after - before" in script
-    assert "'kernel_drop_log': recent_host_drop_log(bridge, gateway, since)" in script
-    assert "set(networks) != {'cerberus-internal'}" in script
-    assert "HostIp" in script
-    assert "await sandbox.destroy()" in script
+    smoke = embedded_smoke_source(script)
+    assert "sandbox.commands.run('hostname; uname -a')" in smoke
+    assert "sandbox.commands.run('nc -w 3 192.0.2.1 65000')" in smoke
+    assert "sandbox.commands.run('nslookup example.com')" in smoke
+    assert "sandbox.commands.run(f'nc -w 3 {gateway} 65000')" in smoke
+    assert smoke.index("assert_closed_probe_port(gateway)") < smoke.index("install_host_drop_probe(bridge)") < smoke.index("install_forward_drop_probe(bridge)") < smoke.index("install_ipv6_drop_probe(bridge)") < smoke.index("sandbox = await Sandbox.create")
+    assert "after <= before" in smoke
+    assert "'host_drop_packets_delta': after - before" in smoke
+    assert "'kernel_drop_log': recent_host_drop_log(bridge, gateway, since)" in smoke
+    assert "set(networks) != {'cerberus-internal'}" in smoke
+    assert "HostIp" in smoke
+    assert "await sandbox.destroy()" in smoke
     assert "--data-binary \"$proof\"" in script
     assert "account-key" not in script
     assert subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True).returncode == 0
-    ast.parse(script.split("/root/opensandbox-venv/bin/python3 - <<'PY'\n", 1)[1].split("\nPY\n", 1)[0])
+    ast.parse(smoke)
 
 
 @pytest.mark.parametrize("change", [
     lambda network, links, addresses: network.update({"Id": "not-a-network-id"}),
     lambda network, links, addresses: network.update({"Internal": False}),
+    lambda network, links, addresses: network.update({"EnableIPv6": True}),
+    lambda network, links, addresses: network.pop("EnableIPv6"),
     lambda network, links, addresses: network.update({"Name": "bridge"}),
     lambda network, links, addresses: network["Options"].update({"com.docker.network.bridge.name": "custom"}),
     lambda network, links, addresses: network["IPAM"]["Config"][0].update({"Gateway": "172.24.0.1"}),
@@ -171,6 +188,43 @@ def test_host_probe_installs_closed_input_chain_before_attaching_bridge(monkeypa
     assert all(command[:4] == ["iptables", "-w", "-t", "filter"] for command in calls)
 
 
+def test_forward_probe_only_blocks_packets_leaving_the_verified_bridge(monkeypatch):
+    calls = []
+    monkeypatch.setattr("sandbox_platform.subprocess.run", lambda command, **kwargs: calls.append(command))
+    install_forward_drop_probe("br-" + "a" * 12)
+    assert calls[0][4:] == ["-N", "CERBERUS_OS_FWD"]
+    assert "LOG" in calls[1] and "cerberus-fwd-drop " in calls[1]
+    assert calls[2][4:] == ["-A", "CERBERUS_OS_FWD", "-j", "DROP"]
+    assert calls[3][4:] == ["-I", "FORWARD", "1", "-i", "br-" + "a" * 12, "!", "-o", "br-" + "a" * 12, "-j", "CERBERUS_OS_FWD"]
+    assert calls[4][4:] == ["-C", "FORWARD", "-i", "br-" + "a" * 12, "!", "-o", "br-" + "a" * 12, "-j", "CERBERUS_OS_FWD"]
+    assert calls[5][4:] == ["-C", "CERBERUS_OS_FWD", "-j", "DROP"]
+
+
+def test_forward_probe_does_not_attach_without_drop_rule(monkeypatch):
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        if "DROP" in command:
+            raise subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr("sandbox_platform.subprocess.run", run)
+    with pytest.raises(subprocess.CalledProcessError):
+        install_forward_drop_probe("br-" + "a" * 12)
+    assert not any("FORWARD" in command for command in calls)
+
+
+def test_ipv6_probe_blocks_host_and_external_forwarding_on_scoped_bridge(monkeypatch):
+    calls = []
+    monkeypatch.setattr("sandbox_platform.subprocess.run", lambda command, **kwargs: calls.append(command))
+    install_ipv6_drop_probe("br-" + "a" * 12)
+    assert all(call[:4] == ["ip6tables", "-w", "-t", "filter"] for call in calls)
+    assert [call[5] for call in calls if call[4] == "-N"] == ["CERBERUS_OS_HOST6", "CERBERUS_OS_FWD6"]
+    assert any(call[4:] == ["-I", "INPUT", "1", "-i", "br-" + "a" * 12, "-j", "CERBERUS_OS_HOST6"] for call in calls)
+    assert any(call[4:] == ["-I", "FORWARD", "1", "-i", "br-" + "a" * 12, "!", "-o", "br-" + "a" * 12, "-j", "CERBERUS_OS_FWD6"] for call in calls)
+    assert sum(call[4] == "-A" and call[-1] == "DROP" for call in calls) == 2
+
+
 def test_host_probe_does_not_attach_incomplete_drop_chain(monkeypatch):
     calls = []
 
@@ -223,13 +277,15 @@ def test_kernel_log_is_genuine_scoped_bounded_and_optional(monkeypatch):
 
 
 @pytest.mark.parametrize("runtime", ["runsc", None])
+@pytest.mark.parametrize("extra_container", [False, True])
+@pytest.mark.parametrize("dns_exit", [1, 0])
 @pytest.mark.parametrize("test_net_exit,host_exit,counters,succeeds", [
     (1, 2, (0, 1), True),
     (0, 2, (0, 1), False),
     (1, 0, (0, 1), False),
     (1, 2, (0, 0), False),
 ])
-def test_generated_smoke_proof_requires_denials_and_host_counter(test_net_exit, host_exit, counters, succeeds, runtime):
+def test_generated_smoke_proof_requires_denials_and_host_counter(test_net_exit, host_exit, counters, succeeds, dns_exit, extra_container, runtime):
     script = opensandbox_spike_user_data()
     encoded = script.split("printf '%s' ", 1)[1].split(" | base64 -d |", 1)[0]
     embedded = zlib.decompress(base64.b64decode(encoded)).decode()
@@ -237,7 +293,7 @@ def test_generated_smoke_proof_requires_denials_and_host_counter(test_net_exit, 
     exec(compile(ast.parse(embedded), "embedded_sandbox_platform", "exec"), module)
     assert module["verified_probe_bridge"](*probe_state()) == ("br-" + "a" * 12, "172.23.0.1")
 
-    smoke = script.split("/root/opensandbox-venv/bin/python3 - <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    smoke = embedded_smoke_source(script)
     function = next(node for node in ast.parse(smoke).body if isinstance(node, ast.AsyncFunctionDef) and node.name == "check")
     saved = {}
     values = {
@@ -249,10 +305,14 @@ def test_generated_smoke_proof_requires_denials_and_host_counter(test_net_exit, 
         ("docker", "network", "inspect", "cerberus-internal"): json.dumps([network]),
         ("ip", "-j", "-d", "link", "show", "dev", "br-" + "a" * 12): json.dumps(links),
         ("ip", "-j", "addr", "show", "dev", "br-" + "a" * 12): json.dumps(addresses),
-        ("docker", "ps", "-q"): "test-container",
+        ("docker", "ps", "-q"): "test-container\nsecond-container" if extra_container else "test-container",
         ("docker", "inspect", "test-container"): json.dumps([{
             "NetworkSettings": {"Networks": {"cerberus-internal": {"NetworkID": network["Id"]}}, "Ports": {}},
             "HostConfig": {"Runtime": runtime},
+        }]),
+        ("docker", "inspect", "second-container"): json.dumps([{
+            "NetworkSettings": {"Networks": {"cerberus-internal": {"NetworkID": network["Id"]}}, "Ports": {}},
+            "HostConfig": {"Runtime": "runsc"},
         }]),
     }
     events = []
@@ -274,7 +334,7 @@ def test_generated_smoke_proof_requires_denials_and_host_counter(test_net_exit, 
         async def run(self, command):
             events.append(command)
             codes = {"hostname; uname -a": 0, "nc -w 3 192.0.2.1 65000": test_net_exit,
-                     "nc -w 3 172.23.0.1 65000": host_exit}
+                     "nslookup example.com": dns_exit, "nc -w 3 172.23.0.1 65000": host_exit}
             return SimpleNamespace(exit_code=codes[command], logs=SimpleNamespace(stdout=[SimpleNamespace(text="sandbox\nLinux test\n")]))
 
     class FakeSandbox:
@@ -282,7 +342,7 @@ def test_generated_smoke_proof_requires_denials_and_host_counter(test_net_exit, 
 
         @classmethod
         async def create(cls, *args, **kwargs):
-            assert events == ["firewall-installed"]
+            assert events == ["firewall-installed", "forward-installed", "ipv6-installed"]
             return cls()
 
         async def destroy(self):
@@ -296,12 +356,14 @@ def test_generated_smoke_proof_requires_denials_and_host_counter(test_net_exit, 
         "verified_probe_bridge": module["verified_probe_bridge"],
         "assert_closed_probe_port": lambda gateway: None,
         "install_host_drop_probe": lambda bridge: events.append("firewall-installed"),
+        "install_forward_drop_probe": lambda bridge: events.append("forward-installed"),
+        "install_ipv6_drop_probe": lambda bridge: events.append("ipv6-installed"),
         "host_drop_packets": lambda: next(packet_counts),
         "recent_host_drop_log": lambda bridge, gateway, since: None,
     }
     exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), "smoke", "exec"), namespace)
-    if not succeeds:
-        with pytest.raises(RuntimeError, match="isolation probe"):
+    if not succeeds or dns_exit == 0 or extra_container:
+        with pytest.raises(RuntimeError, match="isolation probe|exactly one"):
             asyncio.run(namespace["check"]())
         assert saved == {}
     else:
@@ -310,6 +372,7 @@ def test_generated_smoke_proof_requires_denials_and_host_counter(test_net_exit, 
         assert proof == {"hostname": "sandbox", "uname": "Linux test", "exit_code": 0, "isolation": {
             "network_id": "a" * 64, "bridge": "br-" + "a" * 12, "gateway": "172.23.0.1",
             "test_net_1": {"destination": "192.0.2.1:65000", "exit_code": 1},
+            "dns_external": {"destination": "example.com", "exit_code": 1},
             "host_gateway": {"destination": "172.23.0.1:65000", "exit_code": 2},
             "host_drop_packets_before": 0, "host_drop_packets_after": 1, "host_drop_packets_delta": 1,
             "kernel_drop_log": None,

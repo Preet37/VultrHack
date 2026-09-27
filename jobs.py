@@ -147,7 +147,7 @@ async def run_sandbox_smoke_job(job, setup_key, signals):
                         or isolation[name].get("destination") != destination
                         or type(isolation[name].get("exit_code")) is not int
                         or isolation[name]["exit_code"] <= 0
-                        for name, destination in (("test_net_1", f"192.0.2.1:{PROBE_PORT}"), ("host_gateway", f"{gateway}:{PROBE_PORT}"))
+                        for name, destination in (("test_net_1", f"192.0.2.1:{PROBE_PORT}"), ("dns_external", "example.com"), ("host_gateway", f"{gateway}:{PROBE_PORT}"))
                     )
                     or not isinstance(log, str) or len(log) > 512
                     or not all(part in log for part in (HOST_PROBE_LOG_PREFIX, f"IN={bridge} ", f"DST={gateway} ", f"DPT={PROBE_PORT}"))
@@ -165,6 +165,7 @@ async def run_sandbox_smoke_job(job, setup_key, signals):
                 "isolation": {
                     "network_id": network_id, "bridge": bridge, "gateway": gateway,
                     "test_net_1": {key: isolation["test_net_1"][key] for key in ("destination", "exit_code")},
+                    "dns_external": {key: isolation["dns_external"][key] for key in ("destination", "exit_code")},
                     "host_gateway": {key: isolation["host_gateway"][key] for key in ("destination", "exit_code")},
                     "host_drop_packets_before": before, "host_drop_packets_after": after,
                     "host_drop_packets_delta": delta, "kernel_drop_log": log,
