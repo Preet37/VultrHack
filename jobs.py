@@ -4,7 +4,10 @@ import json
 import os
 import re
 import secrets
+import socket
 import subprocess
+import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
@@ -72,12 +75,18 @@ class JobRegistry:
         self.jobs = {}
         self.tasks = set()
 
-    def create(self, kind="connectivity", setup_key=None, signals=None):
-        if kind not in ("connectivity", "sandbox_smoke"):
+    def create(self, kind="connectivity", setup_key=None, signals=None, target=None):
+        if kind not in ("connectivity", "sandbox_smoke", "scan"):
             raise ValueError("Unsupported job type")
         if kind == "sandbox_smoke":
             if not setup_key or signals is None:
                 raise ValueError("Sandbox job requires a one-off key and readiness signals")
+            if any(job.kind == kind and job.status not in TERMINAL for job in self.jobs.values()):
+                return None
+        if kind == "scan":
+            if target not in SCAN_TARGETS:
+                raise ValueError("Unknown scan target")
+            # One scan at a time: each boots a target subprocess on its own port.
             if any(job.kind == kind and job.status not in TERMINAL for job in self.jobs.values()):
                 return None
         if len(self.jobs) >= self.max_jobs:
@@ -87,7 +96,12 @@ class JobRegistry:
             self.jobs.pop(completed)
         job = Job(kind=kind)
         self.jobs[job.id] = job
-        worker = run_connectivity_job(job) if kind == "connectivity" else run_sandbox_smoke_job(job, setup_key, signals)
+        if kind == "connectivity":
+            worker = run_connectivity_job(job)
+        elif kind == "scan":
+            worker = run_scan_job(job, target)
+        else:
+            worker = run_sandbox_smoke_job(job, setup_key, signals)
         task = asyncio.create_task(worker)
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
@@ -106,6 +120,114 @@ async def run_connectivity_job(job):
         await job.publish("failed")
     else:
         await job.publish("completed")
+
+
+# Only our own seeded, deliberately-vulnerable targets may be scanned this way.
+# This job starts the target as a local subprocess, so it must NEVER be pointed
+# at an arbitrary user-supplied repo -- untrusted repositories run only inside
+# the disposable gVisor sandbox. The web endpoint accepts a target *name*, never
+# a path or URL, and it is resolved against this fixed allowlist.
+SCAN_TARGETS = {
+    "seeded_flask": Path(__file__).with_name("targets") / "seeded_flask",
+    "snipstash": Path(__file__).with_name("targets") / "snipstash",
+}
+
+
+def _free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+async def _await_health(base_url, timeout=25.0):
+    deadline = time.monotonic() + timeout
+    async with httpx.AsyncClient(timeout=2.0) as client:
+        while time.monotonic() < deadline:
+            try:
+                if (await client.get(f"{base_url}/health")).status_code == 200:
+                    return
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0.15)
+    raise RuntimeError("target did not become healthy")
+
+
+def _stop_proc(proc):
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+async def run_scan_job(job, target_name):
+    """Full find -> prove -> patch -> re-prove loop over one seeded target.
+
+    Boots the target as a subprocess, runs the finder + remediation loop in a
+    worker thread (both are blocking), and streams a step per phase. The result
+    records ``triage_source`` so the caller can see whether Vultr Serverless
+    Inference or the offline fallback produced the plan.
+    """
+    from finder.pipeline import run_finder
+    from finder.remediate import remediate
+
+    source_dir = SCAN_TARGETS.get(target_name)
+    if source_dir is None:
+        job.error = "Unknown scan target"
+        await job.publish("failed", "start_target")
+        return
+
+    port = _free_port()
+    base_url = f"http://127.0.0.1:{port}"
+    # Strip CERBERUS_* canary overrides so the target plants its manifest-default
+    # canaries -- the same values the oracle reads.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CERBERUS_")}
+    env["PORT"] = str(port)
+    proc = None
+    try:
+        await job.publish("running", "start_target")
+        proc = subprocess.Popen(
+            [sys.executable, "app.py"],
+            cwd=str(source_dir),
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        await _await_health(base_url)
+
+        await job.publish("running", "finding")
+        report = await asyncio.to_thread(run_finder, base_url, str(source_dir))
+        await job.publish("running", f"confirmed_{len(report.findings)}")
+
+        remediations = []
+        certified = 0
+        for finding in report.findings:
+            await job.publish("running", f"patch_{finding.vuln_class}")
+            res = await asyncio.to_thread(remediate, finding, str(source_dir))
+            certified += 1 if res.certified else 0
+            remediations.append(res.to_dict())
+            await job.publish("running", ("certified_" if res.certified else "open_") + finding.vuln_class)
+
+        job.result = {
+            "target": target_name,
+            "triage_source": report.triage_source,
+            "confirmed_findings": len(report.findings),
+            "certified_closed": certified,
+            "findings": [f.to_dict() for f in report.findings],
+            "remediations": remediations,
+            "coverage": report.coverage.to_dict(),
+        }
+    except Exception:
+        job.error = "Scan failed"
+        await job.publish("failed", "scan")
+    else:
+        await job.publish("completed", "complete")
+    finally:
+        if proc is not None:
+            await asyncio.to_thread(_stop_proc, proc)
 
 
 async def run_sandbox_smoke_job(job, setup_key, signals):

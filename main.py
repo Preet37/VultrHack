@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, SecretStr
 
 from instance_lifecycle import ReadySignals
-from jobs import JobRegistry, control_token
+from jobs import JobRegistry, SCAN_TARGETS, control_token
 
 app = FastAPI(title="Cerberus")
 ready_signals = ReadySignals()
@@ -26,9 +26,10 @@ BOOTSTRAP_STAGES = frozenset({
 
 
 class JobRequest(BaseModel):
-    type: Literal["connectivity", "sandbox_smoke"]
+    type: Literal["connectivity", "sandbox_smoke", "scan"]
     approve_vm: bool = False
     netbird_setup_key: SecretStr | None = None
+    target: str | None = None
 
 
 def require_control(authorization):
@@ -186,9 +187,17 @@ async def start_job(request: JobRequest, authorization: str | None = Header(defa
         if not re.fullmatch(r"[A-Za-z0-9-]{32,128}", key):
             raise HTTPException(status_code=400, detail="One-off NetBird key format is invalid")
         job = job_registry.create(request.type, key, ready_signals)
+    elif request.type == "scan":
+        if request.approve_vm or request.netbird_setup_key is not None:
+            raise HTTPException(status_code=400, detail="Scan jobs do not accept sandbox credentials")
+        if request.target not in SCAN_TARGETS:
+            raise HTTPException(status_code=400, detail="Unknown scan target")
+        job = job_registry.create(request.type, target=request.target)
     else:
         if request.approve_vm or request.netbird_setup_key is not None:
             raise HTTPException(status_code=400, detail="Connectivity jobs do not accept sandbox credentials")
+        if request.target is not None:
+            raise HTTPException(status_code=400, detail="Connectivity jobs do not accept a target")
         job = job_registry.create(request.type)
     if job is None:
         raise HTTPException(status_code=429, detail="Too many active jobs")
