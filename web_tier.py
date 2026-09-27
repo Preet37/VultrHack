@@ -115,8 +115,8 @@ cerberus_progress bootstrap_started || :
 def build_create_web_tier_payload(user_data, region, plan):
     if not re.fullmatch(r"[a-z]{3}", region):
         raise ValueError("region must be a short code")
-    if not isinstance(plan, str) or not re.fullmatch(r"[a-z0-9-]{2,48}", plan) or not plan.endswith("gb"):
-        raise ValueError("plan must be a small cloud compute plan")
+    if not isinstance(plan, str) or not re.fullmatch(r"[a-z0-9-]{2,48}", plan) or not (plan.endswith("gb") or re.fullmatch(r"vx1-[a-z0-9-]+-\d+s", plan)):
+        raise ValueError("plan must be a small cloud compute plan or an approved VX1 shape")
     return {
         "region": region,
         "plan": plan,
