@@ -1,0 +1,80 @@
+{
+  "name": "clean_flask",
+  "language": "python",
+  "framework": "flask",
+  "entrypoint": "app.py",
+  "base_url_env": "TARGET_URL",
+  "canary": "CANARY-a1b2c3d4e5f60718-DO-NOT-EXFIL",
+  "canary_env": "CERBERUS_CANARY",
+  "file_canary": "FILECANARY-9f8e7d6c5b4a-DO-NOT-READ",
+  "file_canary_env": "CERBERUS_FILE_CANARY",
+  "acct_canary": "ACCTCANARY-1a2b3c4d5e6f-DO-NOT-SHARE",
+  "acct_canary_env": "CERBERUS_ACCT_CANARY",
+  "ssrf_canary": "SSRFCANARY-0f1e2d3c4b5a-INTERNAL-ONLY",
+  "ssrf_canary_env": "CERBERUS_SSRF_CANARY",
+  "benign": {
+    "path_traversal": "readme.txt"
+  },
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/",
+      "inputs": []
+    },
+    {
+      "method": "GET",
+      "path": "/health",
+      "inputs": []
+    },
+    {
+      "method": "GET",
+      "path": "/product",
+      "inputs": [
+        {
+          "name": "id",
+          "source": "query"
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/download",
+      "inputs": [
+        {
+          "name": "file",
+          "source": "query"
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/net",
+      "inputs": [
+        {
+          "name": "host",
+          "source": "query"
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/fetch",
+      "inputs": [
+        {
+          "name": "url",
+          "source": "query"
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/account",
+      "inputs": [
+        {
+          "name": "id",
+          "source": "query"
+        }
+      ]
+    }
+  ]
+}

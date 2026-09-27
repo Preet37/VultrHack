@@ -7,9 +7,11 @@ report. A clean run reports coverage, never "this code is safe".
 
 from __future__ import annotations
 
+import contextlib
 import time
 
 from finder import confirm as confirm_mod
+from finder.env_canary import EnvCanaries
 from finder.inference import InferenceClient
 from finder.models import Coverage, FinderReport, Finding
 from finder.playbooks import confirmer_for
@@ -47,26 +49,37 @@ def run_finder(
     tested_endpoints: set[str] = set()
     steps = 0
     tested = 0
-    for item in plan:
-        if steps >= max_steps or (time.monotonic() - started) >= wall_clock_seconds:
-            break
-        if item.confidence < CONFIDENCE_THRESHOLD:
-            continue
-        candidate = by_id.get(item.candidate_id)
-        if candidate is None:
-            continue
-        # Only count a class/endpoint as tested when a confirmer can actually
-        # fire at it. Otherwise coverage would claim we tested a class we never
-        # sent a single request for -- the dishonesty this report exists to avoid.
-        if confirmer_for(item.vuln_class) is None:
-            continue
-        steps += 1
-        tested += 1
-        tested_classes.add(item.vuln_class)
-        tested_endpoints.add(item.endpoint)
-        finding = confirm_mod.confirm(item, candidate, base_url, canaries)
-        if finding is not None and not any(f.id == finding.id for f in findings):
-            findings.append(finding)
+    with contextlib.ExitStack() as stack:
+        # No manifest -> the target ships no in-repo canaries, so plant sentinels
+        # in the sandbox ENVIRONMENT (a file outside the app root, a loopback-only
+        # listener) and use those as the oracle. This is the key to generalizing
+        # beyond seeded targets. The manifest path never enters this branch, so
+        # seeded runs are byte-for-byte unchanged.
+        env_payloads: dict[str, list[str]] | None = None
+        if manifest is None:
+            env = stack.enter_context(EnvCanaries())
+            canaries = list(canaries) + env.canaries
+            env_payloads = env.payloads_by_class()
+        for item in plan:
+            if steps >= max_steps or (time.monotonic() - started) >= wall_clock_seconds:
+                break
+            if item.confidence < CONFIDENCE_THRESHOLD:
+                continue
+            candidate = by_id.get(item.candidate_id)
+            if candidate is None:
+                continue
+            # Only count a class/endpoint as tested when a confirmer can actually
+            # fire at it. Otherwise coverage would claim we tested a class we never
+            # sent a single request for -- the dishonesty this report exists to avoid.
+            if confirmer_for(item.vuln_class) is None:
+                continue
+            steps += 1
+            tested += 1
+            tested_classes.add(item.vuln_class)
+            tested_endpoints.add(item.endpoint)
+            finding = confirm_mod.confirm(item, candidate, base_url, canaries, env_payloads=env_payloads)
+            if finding is not None and not any(f.id == finding.id for f in findings):
+                findings.append(finding)
 
     coverage = Coverage(
         classes_tested=sorted(tested_classes),

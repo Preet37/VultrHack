@@ -18,11 +18,16 @@ def confirm(
     base_url: str,
     canaries: list[str],
     timeout: float = 12.0,
+    env_payloads: dict[str, list[str]] | None = None,
 ) -> Finding | None:
     confirmer = confirmer_for(item.vuln_class)
     if confirmer is None:
         return None  # class has no HTTP confirmer yet; not reported without proof
-    result = confirmer(base_url, item.endpoint, f"{item.param}", timeout)
+    # Environmental (sandbox-planted) payloads for a manifest-less target, keyed
+    # by class. None on the seeded (manifest) path -> confirmers behave exactly
+    # as before, so seeded runs are unaffected.
+    extra = (env_payloads or {}).get(item.vuln_class)
+    result = confirmer(base_url, item.endpoint, f"{item.param}", timeout, extra_payloads=extra)
     if not result.fired:
         return None
     # Let the oracle attribute the leak to the exact request that carried the
