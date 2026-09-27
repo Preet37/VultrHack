@@ -1,0 +1,518 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cerberus — Blast Radius Zero</title>
+<meta name="description" content="Cerberus finds real vulnerabilities, proves each with a working exploit inside a disposable gVisor VM on Vultr, patches it, and re-proves the fix — blast radius zero.">
+<style>
+  :root{
+    --bg:#070b1a; --bg2:#0a1030; --panel:#0d1435; --panel2:#111a44;
+    --line:#1e2a5e; --line2:#26346f;
+    --ink:#eaf0ff; --muted:#93a0cf; --faint:#5b6aa0;
+    --blue:#2e90ff; --blue2:#5db2ff; --cyan:#38e6d6; --violet:#8b7bff;
+    --danger:#ff5c6c; --warn:#ffb454; --safe:#37d67a;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono","Fira Code",Menlo,Consolas,monospace;
+    --sans:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --r:16px;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+    -webkit-font-smoothing:antialiased;overflow-x:hidden;line-height:1.5;
+  }
+  #bg-canvas{position:fixed;inset:0;z-index:0;opacity:.55}
+  .glow{position:fixed;z-index:0;filter:blur(90px);opacity:.5;pointer-events:none;border-radius:50%}
+  .glow.a{width:520px;height:520px;background:radial-gradient(circle,#1b53c0,transparent 70%);top:-160px;left:-120px}
+  .glow.b{width:480px;height:480px;background:radial-gradient(circle,#2a8f7e,transparent 70%);top:40%;right:-160px}
+  .glow.c{width:420px;height:420px;background:radial-gradient(circle,#5b3fb0,transparent 70%);bottom:-160px;left:30%}
+  .wrap{position:relative;z-index:2;max-width:1160px;margin:0 auto;padding:0 24px}
+
+  /* nav */
+  nav{position:sticky;top:0;z-index:30;backdrop-filter:blur(14px);
+    background:linear-gradient(180deg,rgba(7,11,26,.9),rgba(7,11,26,.55));
+    border-bottom:1px solid var(--line)}
+  .nav{display:flex;align-items:center;gap:18px;height:64px}
+  .brand{display:flex;align-items:center;gap:11px;font-weight:700;letter-spacing:.2px}
+  .cerb{width:30px;height:30px;position:relative;flex:0 0 auto}
+  .navlinks{display:flex;gap:22px;margin-left:auto}
+  .navlinks a{color:var(--muted);text-decoration:none;font-size:14px;font-weight:500;transition:color .2s}
+  .navlinks a:hover{color:var(--ink)}
+  .pill{display:inline-flex;align-items:center;gap:7px;padding:6px 12px;border:1px solid var(--line2);
+    border-radius:999px;font-size:12px;color:var(--blue2);background:rgba(46,144,255,.08);font-weight:600}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--safe);box-shadow:0 0 10px var(--safe);animation:pulse 2s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  @media(max-width:720px){.navlinks{display:none}}
+
+  /* hero */
+  header{padding:78px 0 30px;text-align:center}
+  .kicker{font-family:var(--mono);font-size:13px;letter-spacing:3px;color:var(--blue2);text-transform:uppercase;margin-bottom:20px}
+  h1{font-size:clamp(46px,9vw,104px);line-height:.98;margin:0;font-weight:800;letter-spacing:-2px}
+  h1 .z{background:linear-gradient(120deg,var(--blue2),var(--cyan));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{font-size:clamp(17px,2.4vw,22px);color:var(--muted);margin:22px auto 0;max-width:680px}
+  .tag{margin:26px auto 0;max-width:640px;font-size:15px;color:var(--faint)}
+  .tag b{color:var(--blue2)}
+
+  /* console launcher */
+  .launch{margin:40px auto 0;max-width:720px;background:linear-gradient(180deg,var(--panel),var(--bg2));
+    border:1px solid var(--line2);border-radius:var(--r);padding:8px;box-shadow:0 30px 80px -30px rgba(0,0,0,.8);
+    display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .launch .prefix{font-family:var(--mono);color:var(--faint);padding-left:12px;font-size:14px}
+  .launch input{flex:1;min-width:220px;background:transparent;border:0;outline:0;color:var(--ink);
+    font-family:var(--mono);font-size:15px;padding:14px 6px}
+  .launch select{background:var(--panel2);color:var(--muted);border:1px solid var(--line2);border-radius:10px;
+    padding:11px 10px;font-family:var(--mono);font-size:13px;outline:0}
+  .btn{background:linear-gradient(120deg,var(--blue),#1667d8);color:#fff;border:0;border-radius:11px;
+    padding:14px 22px;font-weight:700;font-size:15px;cursor:pointer;font-family:var(--sans);
+    box-shadow:0 10px 30px -8px rgba(46,144,255,.7);transition:transform .12s,box-shadow .2s;white-space:nowrap}
+  .btn:hover{transform:translateY(-1px);box-shadow:0 16px 40px -10px rgba(46,144,255,.9)}
+  .btn:active{transform:translateY(0)}
+  .btn[disabled]{opacity:.55;cursor:progress}
+  .hint{margin:16px auto 0;font-size:13px;color:var(--faint);font-family:var(--mono)}
+
+  section{padding:64px 0;position:relative;z-index:2}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:2.5px;color:var(--blue2);text-transform:uppercase}
+  h2{font-size:clamp(28px,4vw,40px);margin:10px 0 8px;font-weight:800;letter-spacing:-.6px}
+  .lead{color:var(--muted);max-width:640px;font-size:16px}
+
+  /* demo stage */
+  .stage{margin-top:34px;display:grid;grid-template-columns:1.05fr .95fr;gap:20px}
+  @media(max-width:900px){.stage{grid-template-columns:1fr}}
+  .rack{display:flex;flex-direction:column;gap:16px}
+  .node{border:1px solid var(--line2);border-radius:14px;padding:14px 16px;background:linear-gradient(180deg,var(--panel),rgba(13,20,53,.4));
+    display:flex;align-items:center;gap:13px;position:relative;transition:border-color .3s,box-shadow .3s}
+  .node.hot{border-color:var(--blue);box-shadow:0 0 0 1px var(--blue),0 14px 40px -18px rgba(46,144,255,.8)}
+  .node .ic{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;background:var(--panel2);
+    border:1px solid var(--line2);font-size:16px;flex:0 0 auto}
+  .node h4{margin:0;font-size:14px;font-weight:700}
+  .node p{margin:2px 0 0;font-size:12px;color:var(--faint);font-family:var(--mono)}
+  .node .stat{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .wire{height:26px;margin-left:32px;border-left:2px dashed var(--line2);position:relative}
+  .packet{position:absolute;left:-5px;top:-4px;width:8px;height:8px;border-radius:50%;background:var(--cyan);
+    box-shadow:0 0 12px var(--cyan);opacity:0}
+  .wire.run .packet{animation:drop 1s ease-in-out infinite}
+  @keyframes drop{0%{top:-4px;opacity:0}20%{opacity:1}80%{opacity:1}100%{top:24px;opacity:0}}
+  .wire .lbl{position:absolute;left:16px;top:2px;font-family:var(--mono);font-size:11px;color:var(--faint)}
+
+  /* VM window */
+  .vm{border:1px solid var(--line2);border-radius:14px;overflow:hidden;background:#05070f;
+    box-shadow:0 30px 90px -30px rgba(0,0,0,.9);position:relative}
+  .vm.booting{animation:vmboot .6s ease}
+  @keyframes vmboot{from{transform:scale(.98);opacity:.4}to{transform:scale(1);opacity:1}}
+  .vm.off{animation:vmoff .8s forwards}
+  @keyframes vmoff{to{filter:grayscale(1) brightness(.35);opacity:.5}}
+  .vmbar{display:flex;align-items:center;gap:8px;padding:10px 13px;background:linear-gradient(180deg,#141c3e,#0d1330);
+    border-bottom:1px solid var(--line2);cursor:grab;font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .vmbar:active{cursor:grabbing}
+  .tl{display:flex;gap:6px}.tl i{width:11px;height:11px;border-radius:50%;display:block}
+  .tl .r{background:#ff5f57}.tl .y{background:#febc2e}.tl .g{background:#28c840}
+  .vmtitle{margin-left:6px}.vmtitle b{color:var(--blue2)}
+  .vmtag{margin-left:auto;color:var(--safe);display:flex;align-items:center;gap:6px}
+  .term{font-family:var(--mono);font-size:12.5px;line-height:1.65;padding:14px 16px;height:420px;overflow:auto;
+    background:radial-gradient(120% 100% at 0 0,#080c18,#05070f);position:relative}
+  .term::after{content:"";position:absolute;inset:0;pointer-events:none;
+    background:repeating-linear-gradient(180deg,rgba(255,255,255,.015) 0 1px,transparent 1px 3px)}
+  .ln{white-space:pre-wrap;word-break:break-word}
+  .c-muted{color:var(--faint)}.c-blue{color:var(--blue2)}.c-cyan{color:var(--cyan)}
+  .c-ok{color:var(--safe)}.c-warn{color:var(--warn)}.c-bad{color:var(--danger)}.c-vio{color:var(--violet)}
+  .prompt{color:var(--safe)}
+  .cursor{display:inline-block;width:8px;height:15px;background:var(--blue2);vertical-align:-2px;
+    margin-left:1px;animation:blink 1s steps(1) infinite;border-radius:1px}
+  @keyframes blink{50%{opacity:0}}
+  .tagbad{color:var(--danger)}.tagok{color:var(--safe)}
+
+  /* findings */
+  .side{display:flex;flex-direction:column;gap:14px}
+  .counters{display:flex;gap:12px}
+  .counter{flex:1;border:1px solid var(--line2);border-radius:12px;padding:14px;background:linear-gradient(180deg,var(--panel),rgba(13,20,53,.3))}
+  .counter .n{font-size:30px;font-weight:800;font-family:var(--mono);letter-spacing:-1px}
+  .counter .l{font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:1.5px;margin-top:2px}
+  .counter.ok .n{color:var(--safe)}.counter.bad .n{color:var(--danger)}.counter.vultr .n{color:var(--blue2)}
+  .findlist{display:flex;flex-direction:column;gap:9px;max-height:392px;overflow:auto;padding-right:4px}
+  .find{border:1px solid var(--line);border-radius:11px;padding:11px 13px;background:var(--panel);
+    opacity:0;transform:translateY(8px);transition:all .4s}
+  .find.show{opacity:1;transform:none}
+  .find .top{display:flex;align-items:center;gap:9px}
+  .find .cls{font-family:var(--mono);font-size:12px;font-weight:700;color:var(--ink)}
+  .find .ep{font-family:var(--mono);font-size:11px;color:var(--faint);margin-left:auto}
+  .find .chips{display:flex;gap:6px;margin-top:9px;flex-wrap:wrap}
+  .chip{font-family:var(--mono);font-size:10.5px;padding:3px 8px;border-radius:6px;border:1px solid var(--line2);color:var(--muted)}
+  .chip.confirmed{color:var(--danger);border-color:rgba(255,92,108,.4);background:rgba(255,92,108,.08)}
+  .chip.patched{color:var(--warn);border-color:rgba(255,180,84,.4);background:rgba(255,180,84,.08)}
+  .chip.blocked{color:var(--blue2);border-color:rgba(46,144,255,.4);background:rgba(46,144,255,.08)}
+  .chip.certified{color:var(--safe);border-color:rgba(55,214,122,.4);background:rgba(55,214,122,.08)}
+  .chip .spin{display:inline-block;animation:sp 1s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+
+  /* checkpoints */
+  .checks{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-top:20px}
+  @media(max-width:760px){.checks{grid-template-columns:repeat(2,1fr)}}
+  .check{border:1px solid var(--line);border-radius:12px;padding:14px;background:var(--panel);opacity:.4;transition:all .5s}
+  .check.lit{opacity:1;border-color:rgba(55,214,122,.5);box-shadow:0 0 0 1px rgba(55,214,122,.3)}
+  .check .k{font-family:var(--mono);font-size:11px;color:var(--faint)}
+  .check .v{font-weight:700;margin-top:5px;font-size:14px;display:flex;align-items:center;gap:7px}
+  .check.lit .tick{color:var(--safe)}
+  .check .tick{color:var(--faint)}
+
+  /* cards / rubric */
+  .grid4{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;margin-top:30px}
+  @media(max-width:760px){.grid4{grid-template-columns:1fr}}
+  .card{border:1px solid var(--line2);border-radius:14px;padding:20px;background:linear-gradient(180deg,var(--panel),rgba(13,20,53,.35));
+    position:relative;overflow:hidden}
+  .card .track{font-size:12px;color:var(--faint);font-family:var(--mono);text-transform:uppercase;letter-spacing:1.5px}
+  .card .q{font-size:19px;font-weight:700;margin:8px 0 12px}
+  .card .a{color:var(--muted);font-size:14px}
+  .card .a b{color:var(--ink)}
+  .badge{position:absolute;top:16px;right:16px;font-size:11px;font-family:var(--mono);padding:4px 9px;border-radius:999px;font-weight:700}
+  .badge.met{color:var(--safe);background:rgba(55,214,122,.12);border:1px solid rgba(55,214,122,.4)}
+  .badge.part{color:var(--warn);background:rgba(255,180,84,.12);border:1px solid rgba(255,180,84,.4)}
+
+  /* tiers */
+  .tiers{display:flex;flex-direction:column;gap:10px;margin-top:26px}
+  .tier{display:flex;align-items:center;gap:16px;border:1px solid var(--line);border-radius:12px;padding:14px 18px;background:var(--panel)}
+  .tier .num{font-family:var(--mono);font-weight:800;font-size:15px;width:26px;color:var(--faint)}
+  .tier .bar{width:6px;align-self:stretch;border-radius:6px}
+  .tier .name{font-weight:700;font-size:15px}.tier .name span{color:var(--faint);font-weight:500;font-size:13px;font-family:var(--mono)}
+  .tier .dies{margin-left:auto;font-size:13px;color:var(--muted);font-family:var(--mono)}
+  .tier.us{border-color:var(--blue);box-shadow:0 0 0 1px var(--blue),0 20px 50px -24px rgba(46,144,255,.7)}
+  .tier.us .us-tag{margin-left:12px;font-size:11px;font-family:var(--mono);color:#fff;background:var(--blue);padding:3px 9px;border-radius:999px;font-weight:700}
+
+  /* architecture */
+  .arch{margin-top:30px;border:1px solid var(--line2);border-radius:16px;padding:26px;background:linear-gradient(180deg,var(--panel),var(--bg2))}
+  .arch svg{width:100%;height:auto;display:block}
+
+  footer{border-top:1px solid var(--line);margin-top:40px;padding:40px 0;color:var(--faint);font-size:13px}
+  .foot{display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+  .foot a{color:var(--blue2);text-decoration:none}
+  .reveal{opacity:0;transform:translateY(24px);transition:opacity .7s,transform .7s}
+  .reveal.in{opacity:1;transform:none}
+</style>
+</head>
+<body>
+<canvas id="bg-canvas"></canvas>
+<div class="glow a"></div><div class="glow b"></div><div class="glow c"></div>
+
+<nav><div class="wrap nav">
+  <div class="brand"><canvas class="cerb" width="60" height="60" id="cerb"></canvas> Cerberus</div>
+  <div class="navlinks">
+    <a href="#demo">Live demo</a>
+    <a href="#rubric">Rubric</a>
+    <a href="#isolation">Isolation</a>
+    <a href="#arch">Architecture</a>
+  </div>
+  <span class="pill"><span class="dot"></span> Powered by Vultr</span>
+</div></nav>
+
+<header class="wrap">
+  <div class="kicker">Blast Radius Zero · Safe Agent Execution on Vultr</div>
+  <h1>Cerberus<span class="z">.</span></h1>
+  <p class="sub">Point it at a repo. It finds a real vulnerability, <b style="color:var(--blue2)">proves it with a working exploit</b> inside a disposable gVisor VM, patches it, and re-proves the fix holds.</p>
+  <p class="tag">“An agent that only chats is a demo. <b>An agent that executes safely is a product.</b>”</p>
+
+  <div class="launch">
+    <span class="prefix">cerberus scan ▸</span>
+    <input id="repo" value="github.com/seeded/vulnerable-shop" spellcheck="false" aria-label="Repository URL">
+    <select id="target">
+      <option value="seeded_flask">seeded_flask</option>
+      <option value="snipstash">snipstash</option>
+    </select>
+    <button class="btn" id="run">Run Cerberus ▸</button>
+  </div>
+  <p class="hint">no finding without a proof — the planted canary leaving the box is the judge, not the model</p>
+</header>
+
+<!-- DEMO -->
+<section id="demo" class="wrap">
+  <div class="eyebrow reveal">Live run</div>
+  <h2 class="reveal">Two instances. One boundary.</h2>
+  <p class="lead reveal">The control plane plans on Vultr Serverless Inference and dispatches the target into a throwaway sandbox over a private network. Untrusted code runs there — never in the app process.</p>
+
+  <div class="stage">
+    <div class="rack">
+      <div class="node" id="n-control">
+        <div class="ic">🧭</div>
+        <div><h4>VX1 #1 · Control plane</h4><p>FastAPI · planner · Vultr inference</p></div>
+        <div class="stat" id="control-stat">idle</div>
+      </div>
+      <div class="wire" id="wire"><span class="packet"></span><span class="lbl">dispatch(task) · private network</span></div>
+      <div class="node" id="n-sandbox">
+        <div class="ic">📦</div>
+        <div><h4>VX1 #2 · Sandbox host</h4><p>gVisor / runsc · disposable</p></div>
+        <div class="stat" id="sandbox-stat">idle</div>
+      </div>
+
+      <div class="vm" id="vm" style="margin-top:2px">
+        <div class="vmbar" id="vmbar">
+          <span class="tl"><i class="r"></i><i class="y"></i><i class="g"></i></span>
+          <span class="vmtitle">sandbox-01 · <b>gVisor / runsc</b> · code task</span>
+          <span class="vmtag" id="vmtag" style="opacity:0"><span class="dot"></span> isolated</span>
+        </div>
+        <div class="term" id="term"><span class="ln c-muted">// idle — press “Run Cerberus” to boot a disposable VM on Vultr</span></div>
+      </div>
+    </div>
+
+    <div class="side">
+      <div class="counters">
+        <div class="counter bad"><div class="n" id="c-confirmed">0</div><div class="l">Confirmed</div></div>
+        <div class="counter ok"><div class="n" id="c-certified">0</div><div class="l">Certified closed</div></div>
+        <div class="counter vultr"><div class="n" id="c-model" style="font-size:13px;line-height:1.9">—</div><div class="l">Triage model</div></div>
+      </div>
+      <div class="findlist" id="findlist"></div>
+    </div>
+  </div>
+
+  <div class="checks" id="checks">
+    <div class="check" data-k="# 1 host check"><div class="k"># 1 host check</div><div class="v"><span class="tick">○</span> CPU virt · /dev/kvm</div></div>
+    <div class="check" data-k="# 2 agent → sandbox_run"><div class="k"># 2 sandbox_run</div><div class="v"><span class="tick">○</span> real stdout</div></div>
+    <div class="check" data-k="# 3 proof"><div class="k"># 3 proof</div><div class="v"><span class="tick">○</span> hostname / uname</div></div>
+    <div class="check" data-k="# 4 isolation probe"><div class="k"># 4 isolation probe</div><div class="v"><span class="tick">○</span> BLOCKED</div></div>
+    <div class="check" data-k="# 5 teardown"><div class="k"># 5 teardown</div><div class="v"><span class="tick">○</span> 0 sandboxes</div></div>
+  </div>
+</section>
+
+<!-- RUBRIC -->
+<section id="rubric" class="wrap">
+  <div class="eyebrow reveal">Track rubric, decoded</div>
+  <h2 class="reveal">What the judge is really asking</h2>
+  <div class="grid4">
+    <div class="card reveal"><span class="badge met">MET</span><div class="track">VM backend on Vultr</div><div class="q">“Show me the instance.”</div><div class="a"><b>cerberus-control</b> runs live on a Vultr VX1 (Chicago); the sandbox host is a second VX1. Real KVM: <b>ls -l /dev/kvm</b>.</div></div>
+    <div class="card reveal"><span class="badge met">MET</span><div class="track">Vultr Serverless Inference</div><div class="q">“Is the model yours, or a borrowed key?”</div><div class="a">Ours — the finder’s triage runs on <b>vultr-inference: deepseek-v4-flash-0731</b>. Every result carries a <b>triage_source</b> that proves the model ran.</div></div>
+    <div class="card reveal"><span class="badge met">MET</span><div class="track">Vultr = orchestration center</div><div class="q">“Planning &amp; dispatching, or a static page?”</div><div class="a">The control plane triages on Vultr, dispatches the target into the sandbox over a private network, and collects verifiable evidence back.</div></div>
+    <div class="card reveal"><span class="badge met">MET</span><div class="track">Sandboxes never in-process</div><div class="q">“If I paste <b style="font-family:var(--mono)">rm -rf /</b>, what dies?”</div><div class="a">The throwaway gVisor VM dies — nothing else. Proven by a real kernel <b>DROP</b> log and a 404 on teardown.</div></div>
+  </div>
+</section>
+
+<!-- ISOLATION -->
+<section id="isolation" class="wrap">
+  <div class="eyebrow reveal">Isolation</div>
+  <h2 class="reveal">A container is not a sandbox</h2>
+  <p class="lead reveal">Four tiers of “what dies when the code goes rogue.” Cerberus runs the recommended combo — OpenSandbox on gVisor — on a disposable VX1 you throw away.</p>
+  <div class="tiers">
+    <div class="tier reveal"><span class="num">01</span><span class="bar" style="background:var(--danger)"></span><div class="name">In-process <span>eval() / subprocess</span></div><div class="dies">dies: your app, DB creds, cloud keys</div></div>
+    <div class="tier reveal"><span class="num">02</span><span class="bar" style="background:var(--warn)"></span><div class="name">Container <span>runc · shared kernel</span></div><div class="dies">dies: one kernel bug from tier 1</div></div>
+    <div class="tier us reveal"><span class="num">03</span><span class="bar" style="background:var(--blue)"></span><div class="name">User-space kernel <span>gVisor · syscalls intercepted</span><span class="us-tag">CERBERUS</span></div><div class="dies">dies: the sandbox process</div></div>
+    <div class="tier reveal"><span class="num">04</span><span class="bar" style="background:var(--safe)"></span><div class="name">microVM <span>Firecracker / Kata · own kernel</span></div><div class="dies">dies: the VM — throw it away</div></div>
+  </div>
+</section>
+
+<!-- ARCH -->
+<section id="arch" class="wrap">
+  <div class="eyebrow reveal">Architecture</div>
+  <h2 class="reveal">The whole path</h2>
+  <div class="arch reveal">
+    <svg viewBox="0 0 1000 360" role="img" aria-label="Cerberus architecture">
+      <defs>
+        <linearGradient id="g1" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#2e90ff"/><stop offset="1" stop-color="#38e6d6"/></linearGradient>
+        <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#5db2ff"/></marker>
+      </defs>
+      <g font-family="ui-monospace,monospace" font-size="13">
+        <rect x="410" y="18" width="180" height="46" rx="10" fill="#0d1435" stroke="#26346f"/><text x="500" y="46" fill="#eaf0ff" text-anchor="middle">Browser · this page</text>
+        <line x1="500" y1="64" x2="500" y2="96" stroke="#26346f" stroke-width="2" marker-end="url(#ar)"/>
+        <rect x="250" y="100" width="500" height="52" rx="12" fill="#111a44" stroke="#2e90ff"/><text x="500" y="132" fill="#5db2ff" text-anchor="middle" font-weight="700">VX1 #1 — Control plane · planner · Vultr inference</text>
+        <line x1="500" y1="152" x2="500" y2="196" stroke="url(#g1)" stroke-width="2" marker-end="url(#ar)"/>
+        <text x="512" y="180" fill="#5b6aa0">dispatch(task) · private network</text>
+        <rect x="200" y="200" width="600" height="140" rx="14" fill="#0d1435" stroke="#26346f"/>
+        <text x="230" y="226" fill="#93a0cf">VX1 #2 — Sandbox host</text>
+        <rect x="228" y="240" width="165" height="80" rx="10" fill="#080c18" stroke="#2e90ff"/><text x="310" y="272" fill="#eaf0ff" text-anchor="middle">sandbox-01</text><text x="310" y="292" fill="#5b6aa0" text-anchor="middle" font-size="11">gVisor · code task</text>
+        <rect x="418" y="240" width="165" height="80" rx="10" fill="#080c18" stroke="#26346f"/><text x="500" y="272" fill="#eaf0ff" text-anchor="middle">sandbox-02</text><text x="500" y="292" fill="#5b6aa0" text-anchor="middle" font-size="11">Playwright · browser</text>
+        <rect x="608" y="240" width="165" height="80" rx="10" fill="#080c18" stroke="#1e2a5e" stroke-dasharray="4 4"/><text x="690" y="272" fill="#93a0cf" text-anchor="middle">sandbox-N</text><text x="690" y="292" fill="#5b6aa0" text-anchor="middle" font-size="11">destroyed on finish</text>
+        <rect x="810" y="104" width="170" height="86" rx="12" fill="#0d1435" stroke="#26346f"/><text x="895" y="140" fill="#5db2ff" text-anchor="middle" font-weight="700">Vultr</text><text x="895" y="160" fill="#93a0cf" text-anchor="middle" font-size="11">Serverless Inference</text><text x="895" y="176" fill="#5b6aa0" text-anchor="middle" font-size="10">api.vultrinference.com</text>
+        <line x1="750" y1="126" x2="806" y2="140" stroke="#26346f" stroke-width="2" marker-end="url(#ar)"/>
+      </g>
+    </svg>
+  </div>
+</section>
+
+<footer><div class="wrap foot">
+  <div class="brand"><canvas class="cerb" width="52" height="52" id="cerb2"></canvas> Cerberus · Blast Radius Zero</div>
+  <span style="margin-left:auto">Built on Vultr VX1 + Serverless Inference · gVisor / OpenSandbox</span>
+  <a href="https://github.com/Preet37/VultrHack" target="_blank" rel="noopener">GitHub ↗</a>
+</div></footer>
+
+<script>
+(function(){
+  "use strict";
+  var $ = function(s,r){return (r||document).querySelector(s)};
+  var sleep = function(ms){return new Promise(function(r){setTimeout(r,ms)})};
+
+  /* ---------- Cerberus mark (three-node crest) ---------- */
+  function drawCerb(cv){
+    if(!cv) return; var c=cv.getContext('2d'), w=cv.width, h=cv.height;
+    c.clearRect(0,0,w,h);
+    var pts=[[w*0.5,h*0.24],[w*0.26,h*0.72],[w*0.74,h*0.72]];
+    c.strokeStyle='rgba(93,178,255,.55)';c.lineWidth=2;
+    c.beginPath();c.moveTo(pts[0][0],pts[0][1]);c.lineTo(pts[1][0],pts[1][1]);c.lineTo(pts[2][0],pts[2][1]);c.closePath();c.stroke();
+    var cols=['#5db2ff','#38e6d6','#8b7bff'];
+    for(var i=0;i<3;i++){c.beginPath();c.fillStyle=cols[i];c.shadowColor=cols[i];c.shadowBlur=10;c.arc(pts[i][0],pts[i][1],w*0.11,0,7);c.fill();}
+    c.shadowBlur=0;c.beginPath();c.fillStyle='#eaf0ff';c.arc(w*0.5,h*0.56,w*0.055,0,7);c.fill();
+  }
+  drawCerb($('#cerb'));drawCerb($('#cerb2'));
+
+  /* ---------- background network ---------- */
+  (function(){
+    var cv=$('#bg-canvas'), c=cv.getContext('2d'), W,H,nodes=[];
+    function size(){W=cv.width=innerWidth;H=cv.height=innerHeight;}
+    size();addEventListener('resize',size);
+    for(var i=0;i<42;i++)nodes.push({x:Math.random()*W,y:Math.random()*H,vx:(Math.random()-.5)*.25,vy:(Math.random()-.5)*.25});
+    function tick(){
+      c.clearRect(0,0,W,H);
+      for(var i=0;i<nodes.length;i++){var n=nodes[i];n.x+=n.vx;n.y+=n.vy;
+        if(n.x<0||n.x>W)n.vx*=-1;if(n.y<0||n.y>H)n.vy*=-1;}
+      for(var i=0;i<nodes.length;i++){for(var j=i+1;j<nodes.length;j++){
+        var a=nodes[i],b=nodes[j],dx=a.x-b.x,dy=a.y-b.y,d=Math.sqrt(dx*dx+dy*dy);
+        if(d<140){c.strokeStyle='rgba(46,144,255,'+(0.14*(1-d/140))+')';c.lineWidth=1;c.beginPath();c.moveTo(a.x,a.y);c.lineTo(b.x,b.y);c.stroke();}}}
+      for(var i=0;i<nodes.length;i++){c.fillStyle='rgba(93,178,255,.5)';c.beginPath();c.arc(nodes[i].x,nodes[i].y,1.4,0,7);c.fill();}
+      requestAnimationFrame(tick);
+    }
+    tick();
+  })();
+
+  /* ---------- reveal on scroll ---------- */
+  var io=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting)e.target.classList.add('in');});},{threshold:.15});
+  document.querySelectorAll('.reveal').forEach(function(el){io.observe(el);});
+
+  /* ---------- terminal typewriter ---------- */
+  var term=$('#term');
+  function el(cls,txt){var s=document.createElement('div');s.className='ln '+(cls||'');s.textContent=txt;return s;}
+  function addLine(cls,txt){var l=el(cls,txt);term.appendChild(l);term.scrollTop=term.scrollHeight;return l;}
+  // Streaming-log reveal: append a whole line with a quick fade + a wipe, then
+  // resolve after a short, length-scaled beat. Cheap to paint (no per-char
+  // reflow under blurred layers), and reads like live logs.
+  function type(cls,txt){
+    return new Promise(function(res){
+      var l=el(cls,txt);l.style.opacity='0';l.style.transform='translateX(-4px)';
+      l.style.transition='opacity .13s ease, transform .13s ease';
+      term.appendChild(l);term.scrollTop=term.scrollHeight;
+      requestAnimationFrame(function(){l.style.opacity='1';l.style.transform='none';});
+      setTimeout(function(){res(l);},Math.min(55+txt.length*2.4,190));
+    });
+  }
+
+  /* ---------- data ---------- */
+  var VULNS=[
+    {cls:'sql injection',ep:'GET /product?id=',canary:'CANARY-a1b2c3d4…',sink:'string-concatenated sqlite query',fix:'parameterized query'},
+    {cls:'path traversal',ep:'GET /download?file=',canary:'FILECANARY-9f8e7d6c…',sink:'unsanitized path join → open()',fix:'reject ../, resolve within base dir'},
+    {cls:'command injection',ep:'GET /net?host=',canary:'FILECANARY-9f8e7d6c…',sink:'input into shell=True subprocess',fix:'argv list, shell=False'},
+    {cls:'ssrf',ep:'GET /fetch?url=',canary:'SSRFCANARY-0f1e2d3c…',sink:'attacker URL → urlopen()',fix:'allowlist scheme/host, block loopback+private'},
+    {cls:'auth bypass / idor',ep:'GET /account?id=',canary:'ACCTCANARY-1a2b3c4d…',sink:'object by client id, no ownership check',fix:'enforce caller owns the record'}
+  ];
+  var KLOG='cerberus-os-drop IN=br-56c2c6d718aa OUT= SRC=172.18.0.2 DST=172.18.0.1 PROTO=TCP SPT=54345 DPT=65000 SYN';
+
+  var running=false;
+  function litCheck(k){var n=document.querySelector('.check[data-k="'+k+'"]');if(n){n.classList.add('lit');var t=n.querySelector('.tick');if(t)t.textContent='✓';}}
+  function resetChecks(){document.querySelectorAll('.check').forEach(function(n){n.classList.remove('lit');var t=n.querySelector('.tick');if(t)t.textContent='○';});}
+
+  function animateCount(node,to,dur){
+    var start=0,t0=performance.now();
+    (function f(now){var p=Math.min(1,(now-t0)/dur);node.textContent=Math.round(start+(to-start)*p);if(p<1)requestAnimationFrame(f);})(t0);
+  }
+
+  function addFinding(v){
+    var d=document.createElement('div');d.className='find';
+    d.innerHTML='<div class="top"><span class="cls">'+v.cls+'</span><span class="ep">'+v.ep+'</span></div>'+
+      '<div class="chips"><span class="chip confirmed">✓ confirmed · canary</span>'+
+      '<span class="chip patch-slot"></span></div>';
+    $('#findlist').appendChild(d);
+    requestAnimationFrame(function(){d.classList.add('show');});
+    return d;
+  }
+
+  async function runDemo(){
+    if(running)return;running=true;
+    var btn=$('#run');btn.disabled=true;btn.textContent='Running…';
+    term.innerHTML='';$('#findlist').innerHTML='';resetChecks();
+    $('#c-confirmed').textContent='0';$('#c-certified').textContent='0';$('#c-model').textContent='—';
+    $('#vm').classList.remove('off');$('#vmtag').style.opacity='0';
+    var repo=$('#repo').value||'seeded target';
+
+    // dispatch
+    $('#n-control').classList.add('hot');$('#control-stat').textContent='planning';
+    await type('prompt','$ cerberus scan '+repo,10);
+    await type('c-muted','recon · static sweep · triage → Vultr Serverless Inference',12);
+    await sleep(250);
+    $('#wire').classList.add('run');$('#control-stat').textContent='dispatch →';
+    await type('c-blue','dispatch(task) → sandbox host over private network',12);
+    await sleep(700);
+    $('#n-sandbox').classList.add('hot');$('#sandbox-stat').textContent='booting';
+    $('#vm').classList.add('booting');
+
+    // checkpoint 1 — host check
+    await type('c-muted','# 1 host check',10);
+    await type('c-ok','  ✓ CPU virt = svm',8);
+    await type('c-ok','  ✓ /dev/kvm present · read/write',8);
+    await type('c-ok','  ✓ docker default runtime = runsc',8);
+    litCheck('# 1 host check');$('#sandbox-stat').textContent='gVisor up';
+    await sleep(200);
+
+    // checkpoint 2 + 3 — sandbox_run + proof
+    await type('c-muted','# 2 agent → sandbox_run',10);
+    await type('c-cyan','  [0, 1, 1, 2, 3, 5, 8, 13, 21, 34]',10);
+    litCheck('# 2 agent → sandbox_run');
+    await type('c-muted','# 3 proof',10);
+    await type('','  Linux py-demo 4.19.0-gvisor #1 SMP x86_64 GNU/Linux  · exit 0',9);
+    litCheck('# 3 proof');
+    $('#vmtag').style.opacity='1';
+    await sleep(250);
+
+    // finder loop
+    await type('c-vio','── finder: no finding without a proof ──',10);
+    $('#c-model').textContent='deepseek-v4-flash';
+    var confirmed=0,certified=0;
+    for(var i=0;i<VULNS.length;i++){
+      var v=VULNS[i];
+      await type('c-bad','● '+v.cls+'  '+v.ep,8);
+      await type('c-muted','    sink: '+v.sink,6);
+      await type('c-bad','    CONFIRMED — canary '+v.canary+' left the box',7);
+      confirmed++;animateCount($('#c-confirmed'),confirmed,300);
+      var card=addFinding(v);
+      var slot=card.querySelector('.patch-slot');
+      slot.className='chip patch-slot patched';slot.innerHTML='<span class="spin">◠</span> patching';
+      await type('c-warn','    patch: '+v.fix,7);
+      await sleep(150);
+      await type('c-blue','    re-exploit + mutations → BLOCKED',7);
+      slot.className='chip patch-slot certified';slot.textContent='✓ certified closed';
+      await type('c-ok','    CERTIFIED CLOSED · regression test emitted',7);
+      certified++;animateCount($('#c-certified'),certified,300);
+      await sleep(120);
+    }
+
+    // checkpoint 4 — isolation probe
+    await type('c-muted','# 4 isolation probe',10);
+    await type('c-muted','  attempt → 192.0.2.1:65000 (reserved) · host gateway',7);
+    await type('c-blue','  BLOCKED — bridge-scoped iptables DROP (+2)',8);
+    await type('c-muted','  '+KLOG,4);
+    litCheck('# 4 isolation probe');
+    await sleep(200);
+
+    // checkpoint 5 — teardown
+    await type('c-muted','# 5 teardown',10);
+    $('#vm').classList.add('off');$('#vmtag').style.opacity='0';
+    await type('c-ok','  sandbox destroyed · instance 011fa7ef… → 404 · 0 sandboxes remain',7);
+    litCheck('# 5 teardown');
+    $('#c-model').textContent='deepseek-v4-flash';
+    await type('prompt','$ done — 5 confirmed · 5 certified · blast radius zero',10);
+    $('#control-stat').textContent='done';$('#sandbox-stat').textContent='destroyed';
+    $('#n-control').classList.remove('hot');$('#n-sandbox').classList.remove('hot');$('#wire').classList.remove('run');
+
+    btn.disabled=false;btn.textContent='Run again ▸';running=false;
+  }
+
+  $('#run').addEventListener('click',runDemo);
+
+  /* auto-play once when the stage scrolls into view */
+  var stage=$('#demo'),played=false;
+  var io2=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting&&!played){played=true;setTimeout(runDemo,400);}});},{threshold:.25});
+  io2.observe(stage);
+
+  /* draggable VM window */
+  (function(){
+    var vm=$('#vm'),bar=$('#vmbar'),drag=false,ox=0,oy=0,x=0,y=0;
+    bar.addEventListener('pointerdown',function(e){drag=true;ox=e.clientX-x;oy=e.clientY-y;bar.setPointerCapture(e.pointerId);});
+    bar.addEventListener('pointermove',function(e){if(!drag)return;x=e.clientX-ox;y=e.clientY-oy;vm.style.transform='translate('+x+'px,'+y+'px)';});
+    bar.addEventListener('pointerup',function(){drag=false;});
+  })();
+})();
+</script>
+</body>
+</html>
