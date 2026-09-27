@@ -9,12 +9,15 @@ password, the web cookie secret, the control bearer and its NetBird setup key.
 from __future__ import annotations
 
 import base64
+import json
 import re
 import secrets
 import shlex
+import zlib
 
 
-def web_tier_user_data(repo_sha, netbird_setup_key, control_token, demo_password, web_secret=None):
+def web_tier_user_data(repo_sha, netbird_setup_key, control_token, demo_password, web_secret=None, progress_form=None):
+    reporter = _progress_reporter(progress_form) if progress_form is not None else ""
     if web_secret is None:
         web_secret = secrets.token_urlsafe(48)
     if not isinstance(repo_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", repo_sha):
@@ -33,10 +36,13 @@ set -eu
 systemctl stop ssh.socket ssh.service || :
 systemctl mask ssh.socket ssh.service || :
 export DEBIAN_FRONTEND=noninteractive HOME=/root
-apt-get update -q && apt-get install -y -q python3-venv curl ca-certificates openssl git-core
-curl -fsSL https://install.netbird.io | sh
-netbird up --setup-key {shlex.quote(netbird_setup_key)}
+{reporter}apt-get update -q && apt-get install -y -q python3-venv curl ca-certificates openssl git-core 2>&1 | tail -1
+cerberus_progress packages_ready || :
+curl -fsSL https://install.netbird.io | sh >/root/netbird-install.log 2>&1
+netbird up --setup-key {shlex.quote(netbird_setup_key)} >>/root/netbird-install.log 2>&1
+for i in $(seq 1 20); do netbird status --check ready >/dev/null 2>&1 && break; sleep 3; done
 netbird status --check ready
+cerberus_progress netbird_ready || :
 mkdir -p /etc/cerberus-web /opt/cerberus-web
 umask 077
 cat > /etc/cerberus-web/web.env <<'WEBENV'
@@ -47,6 +53,7 @@ git clone --quiet --depth 50 https://github.com/Preet37/VultrHack /opt/cerberus-
 cd /opt/cerberus-web/app && git checkout -q {repo_sha}
 python3 -m venv /opt/cerberus-web/venv
 /opt/cerberus-web/venv/bin/pip install -q fastapi==0.136.3 uvicorn==0.38.0 httpx==0.28.1 python-dotenv==1.2.1
+cerberus_progress code_ready || :
 openssl req -x509 -newkey rsa:2048 -keyout /etc/cerberus-web/tls.key -out /etc/cerberus-web/tls.crt -days 365 -nodes -subj '/CN=cerberus-demo' >/dev/null 2>&1
 cat > /etc/systemd/system/cerberus-web.service <<'UNIT'
 [Unit]
@@ -67,12 +74,37 @@ WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
 systemctl enable --now cerberus-web
+cerberus_progress service_started || :
 if command -v ufw >/dev/null 2>&1; then
   ufw default deny incoming || :
   ufw allow in on wt0 || :
   ufw allow 443/tcp || :
   yes | ufw enable || :
 fi
+cerberus_progress firewall_done || :
+"""
+
+
+def _progress_reporter(form):
+    encoded = base64.b64encode(json.dumps(form, separators=(",", ":")).encode()).decode()
+    return f"""cerberus_progress() {{
+  python3 - {shlex.quote("-")} "$1" {shlex.quote(encoded)} <<'PPY'
+import base64,json,secrets,sys,urllib.request as u
+form=json.loads(base64.b64decode(sys.argv[2]))
+boundary='cerberus'+secrets.token_hex(8)
+parts=[]
+for name,value in form['fields'].items():
+    parts.append((f'--{{boundary}}\\r\\nContent-Disposition: form-data; name="{{name}}"\\r\\n\\r\\n{{value}}\\r\\n').encode())
+parts.append((f'--{{boundary}}\\r\\nContent-Disposition: form-data; name="file"; filename="progress.json"\\r\\nContent-Type: application/json\\r\\n\\r\\n').encode())
+parts.append(json.dumps({{"probe":sys.argv[1],"vpc_ip":None}}).encode())
+parts.append((f'\\r\\n--{{boundary}}--\\r\\n').encode())
+body=b''.join(parts)
+try:
+    if len(body)<=4096:u.urlopen(u.Request(form['url'],body,{{'Content-Type':'multipart/form-data; boundary='+boundary}}),timeout=5).close()
+except Exception:pass
+PPY
+}}
+cerberus_progress bootstrap_started || :
 """
 
 
