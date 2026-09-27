@@ -137,11 +137,20 @@ Jobs and events are bounded and held **in memory only**: a process restart loses
 
 The end-to-end engine — recon, static sweep, triage, canary-confirmed exploit, patch on a disposable copy, re-exploit, functional check, static validation, and a certified-closed verdict — runs as a control-API job so a browser UI can drive it. It is the same loop as the `python -m finder.remediate` CLI, exposed over the token-protected control API. This is the demoable web-app surface.
 
-- `POST /jobs` with `{"type":"scan","target":"seeded_flask"}` (or `"snipstash"`) returns 202 and a job ID. `target` is a **name resolved against a fixed allowlist**, never a path or URL: this job boots the target as a local subprocess, so it must not be pointed at an arbitrary repository. Untrusted repositories run only inside the disposable gVisor sandbox; wiring the scanned target into that sandbox is the remaining integration.
+- `POST /jobs` with `{"type":"scan","target":"seeded_flask"}` (or `"snipstash"`) returns 202 and a job ID. `target` is a **name resolved against a fixed allowlist**, never a path or URL. How the target is *executed* is chosen by the runner seam below; the default local runner shares this host, so it is only ever pointed at our own seeded targets.
 - `GET /jobs/{id}/result` returns `{confirmed_findings, certified_closed, findings[], remediations[], coverage, triage_source}`. `triage_source` is `vultr-inference:<model>` when a Vultr Serverless Inference key is set, or `offline-heuristic` on the deterministic fallback — a run never implies the model ran when it did not.
 - `WS /jobs/{id}/events` streams a step per phase: `finding`, `confirmed_<n>`, `patch_<class>`, `certified_<class>` / `open_<class>`, `complete`.
 
 Verified end-to-end via the control API on the seeded targets: **5 confirmed, 5 certified closed, all five classes**, on both `offline-heuristic` and live `vultr-inference:deepseek-v4-flash-0731`. A single remediation failure is recorded against that finding without discarding the rest of the run. Only one scan runs at a time.
+
+### The isolation seam (`finder/target_runner.py`)
+
+The finder needs one thing from whatever runs the target: a base URL to attack and a way to tear it down. That is isolated behind a `TargetRunner` so the scan can move from "runs on the control host" to "runs in a throwaway VM" by swapping one object — the find/prove/patch/certify logic does not change. Static analysis and patching stay on the control plane against the local source (the control plane owns the repo); only target **execution** is what a runner isolates, matching the two-instance architecture above.
+
+- `LocalSubprocessRunner` — boots the target as a local process. This is Tier-1 "in-process" isolation (the target shares this host), so it is only for our own seeded, trusted targets.
+- `SandboxTargetRunner` — dispatches the target into a disposable gVisor sandbox on the sandbox host over the private network, so untrusted code has blast radius zero. It needs one primitive from the sandbox host — *run this app, return a private-network URL, destroy it* — injected as `dispatch`. Until that primitive exists it **fails closed** (raises rather than falling back to the control host); it does not run an untrusted target in-process.
+
+The runner is selected by `CERBERUS_SCAN_RUNNER` (`local` default, or `sandbox`). Selecting `sandbox` before its `dispatch` is wired makes a scan fail closed rather than run locally. This is the exact drop-in point for the sandbox host's app-execution primitive; wiring that primitive is the remaining integration for scanning arbitrary repositories.
 
 ## Persistent control-plane VX1 (live)
 

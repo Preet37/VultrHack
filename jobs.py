@@ -5,8 +5,6 @@ import os
 import re
 import secrets
 import subprocess
-import sys
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
@@ -134,30 +132,19 @@ SCAN_TARGETS = {
 }
 
 
-async def _await_health(base_url, timeout=25.0):
-    deadline = time.monotonic() + timeout
-    async with httpx.AsyncClient(timeout=2.0) as client:
-        while time.monotonic() < deadline:
-            try:
-                if (await client.get(f"{base_url}/health")).status_code == 200:
-                    return
-            except httpx.HTTPError:
-                pass
-            await asyncio.sleep(0.15)
-    raise RuntimeError("target did not become healthy")
-
-
 async def run_scan_job(job, target_name):
-    """Full find -> prove -> patch -> re-prove loop over one seeded target.
+    """Full find -> prove -> patch -> re-prove loop over one scan target.
 
-    Boots the target as a subprocess, runs the finder + remediation loop in a
-    worker thread (both are blocking), and streams a step per phase. The result
-    records ``triage_source`` so the caller can see whether Vultr Serverless
-    Inference or the offline fallback produced the plan.
+    Gets a reachable target from a TargetRunner -- a local subprocess today, a
+    disposable gVisor sandbox once that seam is wired -- runs the finder +
+    remediation loop in a worker thread (both are blocking), and streams a step
+    per phase. The result records ``triage_source`` so the caller can see whether
+    Vultr Serverless Inference or the offline fallback produced the plan.
     """
     from finder.pipeline import run_finder
     from finder.recon import load_manifest
-    from finder.remediate import _stop, free_port, remediate
+    from finder.remediate import remediate
+    from finder.target_runner import make_runner
 
     source_dir = SCAN_TARGETS.get(target_name)
     if source_dir is None:
@@ -165,27 +152,17 @@ async def run_scan_job(job, target_name):
         await job.publish("failed", "start_target")
         return
 
-    # Start the target the same way remediate() does: honor the manifest's
-    # entrypoint (default app.py) so the two phases never disagree about how to
-    # boot the same target.
+    # Honor the manifest's entrypoint (default app.py) so the runner boots the
+    # target the same way remediate() does. The runner mode comes from
+    # CERBERUS_SCAN_RUNNER (default local); sandbox mode fails closed until the
+    # sandbox dispatch primitive is injected -- it never falls back to this host.
     entrypoint = (load_manifest(str(source_dir)) or {}).get("entrypoint", "app.py")
-    port = free_port()
-    base_url = f"http://127.0.0.1:{port}"
-    # Strip CERBERUS_* canary overrides so the target plants its manifest-default
-    # canaries -- the same values the oracle reads.
-    env = {k: v for k, v in os.environ.items() if not k.startswith("CERBERUS_")}
-    env["PORT"] = str(port)
-    proc = None
+    runner = make_runner(str(source_dir), entrypoint)
+    started = False
     try:
         await job.publish("running", "start_target")
-        proc = subprocess.Popen(
-            [sys.executable, entrypoint],
-            cwd=str(source_dir),
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        await _await_health(base_url)
+        base_url = await asyncio.to_thread(runner.start)
+        started = True
 
         await job.publish("running", "finding")
         report = await asyncio.to_thread(run_finder, base_url, str(source_dir))
@@ -227,8 +204,8 @@ async def run_scan_job(job, target_name):
     else:
         await job.publish("completed", "complete")
     finally:
-        if proc is not None:
-            await asyncio.to_thread(_stop, proc)
+        if started:
+            await asyncio.to_thread(runner.stop)
 
 
 async def run_sandbox_smoke_job(job, setup_key, signals, vpc_mode=False):
