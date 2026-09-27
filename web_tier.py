@@ -17,6 +17,10 @@ import zlib
 
 
 def web_tier_user_data(repo_sha, netbird_setup_key, control_token, demo_password, web_secret=None, progress_form=None):
+    if progress_form is not None:
+        from instance_lifecycle import validated_presigned_nic_post
+
+        validated_presigned_nic_post(progress_form)
     reporter = _progress_reporter(progress_form) if progress_form is not None else ""
     if web_secret is None:
         web_secret = secrets.token_urlsafe(48)
