@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 
@@ -215,8 +215,10 @@ def confirm_ssrf(base_url: str, endpoint: str, input_source: str, timeout: float
     """Make the server fetch an internal-only endpoint; success is the canary coming back."""
     _, param = _split_source(input_source)
     base = base_url.rstrip("/")
+    port = urlsplit(base).port
     payloads = [
         f"{base}/internal/metadata",  # the server can reach its own internal route
+        *( [f"http://127.0.0.1:{port}/internal/metadata"] if port else [] ),  # published-port loopback inside the sandbox
         "http://127.0.0.1/internal/metadata",
         "http://localhost/internal/metadata",
     ]

@@ -4,6 +4,7 @@ import io
 import json
 import re
 import secrets
+import tarfile
 import threading
 import time
 from pathlib import Path
@@ -16,11 +17,14 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 import diagnostic_run
+import finder.pipeline
 import jobs
 from diagnostic_receiver import validated_nic_report
 from diagnostic_run import main as diagnostic_main, validated_operator_url
-from diagnostic_storage import presign_nic_post
+from diagnostic_storage import presign_nic_post, presign_source_get
+from finder.models import Coverage, FinderReport, Finding
 from main import app, vpc_callback_app
+from test_instance_lifecycle import unpack_vpc_payload
 
 CONTROL_TOKEN = "test-" + "x" * 40
 
@@ -452,7 +456,7 @@ def test_sandbox_worker_proves_private_path_and_cleans_up(monkeypatch, readiness
         nonlocal destroyed
         calls.append((request.method, request.url.path))
         if request.method == "POST":
-            script = base64.b64decode(json.loads(request.content)["user_data"]).decode()
+            script = unpack_vpc_payload(base64.b64decode(json.loads(request.content)["user_data"]).decode())
             assert "http://100.124.55.15:8000/internal/ready" in script
             assert script.count("A" * 36) == 1
             assert "account-key" not in script
@@ -492,7 +496,7 @@ def test_sandbox_worker_proves_private_path_and_cleans_up(monkeypatch, readiness
     if failed_stage:
         assert failed_stage in job.error
     if readiness_fails:
-        assert "timed out after network_create" in job.error
+        assert "stage=network_create" in job.error and "TimeoutError" in job.error
     if not readiness_fails and not missing_log and dns_exit != 0 and not failed_stage:
         assert job.result["destroyed"] is True
         assert job.result["opensandbox"]["exit_code"] == 0
@@ -545,7 +549,7 @@ def test_vpc_worker_proves_private_connection_without_a_netbird_setup_key(monkey
             return httpx.Response(405)
         if request.method == "POST":
             payload = json.loads(request.content)
-            script = base64.b64decode(payload["user_data"]).decode()
+            script = unpack_vpc_payload(base64.b64decode(payload["user_data"]).decode())
             assert payload["attach_vpc"] == [vpc_id]
             assert "netbird up" not in script and "account-key" not in script
             return httpx.Response(202, json={"instance": {"id": "instance-123"}})
@@ -708,3 +712,335 @@ def test_scan_seeded_flask_runs_full_loop(auth, monkeypatch):
         # The report must record which brain produced the plan (Vultr inference or
         # the offline fallback) so a run never implies the model ran when it did not.
         assert result["triage_source"]
+
+
+# --- Sandbox scan jobs: a seeded target runs inside gVisor on a disposable VPC VX1 ---
+
+VPC_ENV = {
+    "CERBERUS_VPC_ID": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "CERBERUS_CONTROL_INSTANCE_ID": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    "CERBERUS_CONTROL_VPC_IP": "10.52.0.2",
+    "CERBERUS_VPC_SUBNET": "10.52.0.0/24",
+    "VULTR_REGION": "ord",
+}
+S3_ENV = {
+    "CERBERUS_S3_ENDPOINT": "ord1.vultrobjects.com",  # scheme-less, like the operator .env
+    "CERBERUS_S3_BUCKET": "cerberus-target-src",
+    "CERBERUS_S3_ACCESS_KEY": "test-access",
+    "CERBERUS_S3_SECRET_KEY": "test-secret",
+}
+
+
+class FakeScanStorage:
+    def __init__(self, delegate):
+        self._delegate = delegate
+        self.meta = delegate.meta
+        self.objects = {}
+        self.deleted = []
+
+    def generate_presigned_url(self, *args, **kwargs):
+        return self._delegate.generate_presigned_url(*args, **kwargs)
+
+    def put_object(self, Bucket, Key, Body):
+        self.objects[(Bucket, Key)] = Body
+
+    def delete_object(self, Bucket, Key):
+        self.deleted.append((Bucket, Key))
+        self.objects.pop((Bucket, Key), None)
+
+
+def fake_scan_proof(vpc_ip="10.52.0.3", target="healthy"):
+    return {
+        "hostname": "vx1", "uname": "Linux vx1", "cpu_virt": "svm", "kvm_device": True, "kvm_access": True,
+        "runtime": "runsc", "sandbox_hostname": "smoke", "sandbox_uname": "Linux gvisor", "exit_code": 0,
+        "vpc_ip": vpc_ip, "target": target, "endpoint": f"http://{vpc_ip}:8081",
+    }
+
+
+def fake_finder_report(target):
+    finding = Finding(
+        id="sqli-1", vuln_class="sqli", endpoint="/product", param="id",
+        input_to_sink="query:id -> product()", sink_file="app.py", sink_line=42,
+        exploit_request="GET /product?id=1 OR 1=1", confirming_output="CANARY observed",
+        canary_observed=True, canary_value="CANARY-x", fix="parameterize", confirmer="sqli_basic",
+        triage_source="offline-heuristic",
+    )
+    return FinderReport(
+        target=target, findings=[finding],
+        coverage=Coverage(
+            classes_tested=["sqli"], endpoints_tested=["/product"], candidates_seen=5,
+            candidates_tested=2, not_reached=["ssrf"], steps_used=2, wall_clock_seconds=1.5,
+        ),
+        triage_source="offline-heuristic",
+    )
+
+
+def run_fake_sandbox_scan(monkeypatch, proof, target_name="seeded_flask"):
+    state = {"calls": [], "scripts": [], "scanned": [], "storage": [], "destroyed": False}
+
+    class Signals:
+        registered = False
+        unregistered = False
+
+        def register(self):
+            self.registered = True
+            return "R" * 43
+
+        async def wait(self, token, timeout):
+            assert timeout == 600
+            return proof
+
+        def stage(self, token):
+            return None
+
+        def unregister(self, token):
+            self.unregistered = True
+
+    signals = Signals()
+
+    def respond(request):
+        calls = state["calls"]
+        calls.append((request.method, request.url.host, request.url.path))
+        path = request.url.path
+        if path == f"/v2/vpcs/{VPC_ENV['CERBERUS_VPC_ID']}":
+            return httpx.Response(200, json={"vpc": {"id": VPC_ENV["CERBERUS_VPC_ID"], "region": "ord", "v4_subnet": "10.52.0.0", "v4_subnet_mask": 24}})
+        if path == f"/v2/instances/{VPC_ENV['CERBERUS_CONTROL_INSTANCE_ID']}/vpcs":
+            return httpx.Response(200, json={"vpcs": [{"id": VPC_ENV["CERBERUS_VPC_ID"], "ip_address": "10.52.0.2"}]})
+        if request.method == "HEAD" and request.url.host == "10.52.0.2":
+            return httpx.Response(405)
+        if request.method == "POST" and path == "/v2/instances":
+            payload = json.loads(request.content)
+            assert payload["attach_vpc"] == [VPC_ENV["CERBERUS_VPC_ID"]]
+            assert len(payload["user_data"]) < 16 * 1024
+            state["scripts"].append(unpack_vpc_payload(base64.b64decode(payload["user_data"]).decode()))
+            return httpx.Response(202, json={"instance": {"id": "instance-123"}})
+        if path == "/v2/instances/instance-123/vpcs":
+            return httpx.Response(200, json={"vpcs": [{"id": VPC_ENV["CERBERUS_VPC_ID"], "ip_address": "10.52.0.3"}]})
+        if request.method == "DELETE":
+            state["destroyed"] = True
+            return httpx.Response(204)
+        if path == "/v2/instances/instance-123":
+            if state["destroyed"]:
+                return httpx.Response(404)
+            return httpx.Response(200, json={"instance": {"status": "active", "power_status": "running"}})
+        return httpx.Response(401)
+
+    for name, value in VPC_ENV.items():
+        monkeypatch.setenv(name, value)
+    for name, value in S3_ENV.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(jobs, "load_keys", lambda: ("account-key", "inference-key"))
+    client_type = httpx.AsyncClient
+    monkeypatch.setattr(jobs.httpx, "AsyncClient", lambda **kwargs: client_type(transport=httpx.MockTransport(respond), **kwargs))
+
+    real_client_factory = boto3.client
+
+    def client_factory(service="s3", **kwargs):
+        assert service == "s3"
+        storage = FakeScanStorage(real_client_factory(service, **kwargs))
+        state["storage"].append(storage)
+        return storage
+
+    monkeypatch.setattr(boto3, "client", client_factory)
+
+    def fake_run_finder(base_url, source_dir, **kwargs):
+        state["scanned"].append((base_url, source_dir, kwargs))
+        return fake_finder_report(base_url)
+
+    monkeypatch.setattr(finder.pipeline, "run_finder", fake_run_finder)
+    job = jobs.Job(kind="sandbox_scan")
+    asyncio.run(jobs.run_sandbox_scan_job(job, target_name, signals))
+    assert signals.registered
+    assert signals.unregistered
+    return job, state
+
+
+def test_sandbox_scan_worker_scans_a_disposable_gvisor_target_and_cleans_up(monkeypatch):
+    job, state = run_fake_sandbox_scan(monkeypatch, fake_scan_proof())
+    assert job.status == "completed"
+    assert job.error is None
+    assert state["destroyed"] and state["calls"][-1] == ("GET", "api.vultr.com", "/v2/instances/instance-123")
+    assert [event["step"] for event in job.events] == ["sandbox_scan", "preflight", "provisioning", "bootstrap", "scanning", "teardown", "complete"]
+    script = state["scripts"][0]
+    assert "https://cerberus-target-src.ord1.vultrobjects.com/src/" in script
+    assert '-p "$vpc_ip":8081:8081' in script and "-p 8081" not in script
+    assert "docker run -d --runtime=runsc" in script and "netbird up" not in script
+    assert 'ENTRYPOINT ["python", "app.py"]' in script
+    # No Vultr key and no storage SECRET: the presigned GET (which carries the
+    # access-key id in its SigV4 credential) is the only embedded credential.
+    assert "account-key" not in script and "test-secret" not in script
+    assert script.count("test-access") == 1 and "X-Amz-Credential=test-access%2F" in script
+    assert state["scanned"] == [("http://10.52.0.3:8081", str(jobs.SCAN_TARGETS["seeded_flask"]), {})]
+    storage = state["storage"][0]
+    assert storage.objects == {} and len(storage.deleted) == 1
+    bucket, key = storage.deleted[0]
+    assert bucket == "cerberus-target-src" and re.fullmatch(r"src/[0-9a-f]{32}\.tgz", key)
+    result = job.result
+    assert result["instance_id"] == "instance-123" and result["destroyed"] is True and result["source_object_deleted"] is True
+    assert result["vpc_ip"] == "10.52.0.3" and result["endpoint"] == "http://10.52.0.3:8081" and result["endpoint_health"] == "healthy"
+    assert result["target"] == "seeded_flask" and result["triage_source"] == "offline-heuristic"
+    assert result["confirmed_findings"] == 1 and result["findings"][0]["vuln_class"] == "sqli"
+    assert result["coverage"]["classes_tested"] == ["sqli"] and result["coverage"]["steps_used"] == 2
+    assert result["host"]["hostname"] == "vx1" and result["host"]["kvm_access"] is True
+    for leaked in ("account-key", "test-secret", "test-access", "R" * 43):
+        assert leaked not in str(result) + str(job.events) + str(job.error)
+
+
+@pytest.mark.parametrize("proof", [fake_scan_proof(vpc_ip="10.52.0.4"), fake_scan_proof(target="degraded")])
+def test_sandbox_scan_worker_rejects_a_proof_that_does_not_match_the_provider_attachment(monkeypatch, proof):
+    job, state = run_fake_sandbox_scan(monkeypatch, proof)
+    assert job.status == "failed" and job.result is None
+    assert "ValueError; stage=none" in job.error
+    assert "verify cleanup of instance instance-123" in job.error
+    assert state["destroyed"] and state["scanned"] == []
+    assert len(state["storage"][0].deleted) == 1
+    assert "account-key" not in job.error and "test-secret" not in job.error
+
+
+def test_sandbox_scan_worker_surfaces_a_bounded_bootstrap_failure_stage(monkeypatch):
+    job, state = run_fake_sandbox_scan(monkeypatch, {"failure_stage": "target_health", "exit_code": 7})
+    assert job.status == "failed" and job.result is None
+    assert "RuntimeError; stage=target_health" in job.error
+    assert state["destroyed"] and len(state["storage"][0].deleted) == 1
+
+
+def test_sandbox_scan_worker_fails_before_provisioning_without_storage_config(monkeypatch):
+    class Signals:
+        def register(self):
+            pytest.fail("No readiness token before storage preflight")
+
+        def stage(self, token):
+            return None
+
+    for name, value in VPC_ENV.items():
+        monkeypatch.setenv(name, value)
+    for name in S3_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(jobs, "load_keys", lambda: pytest.fail("No API keys before storage preflight"))
+    job = jobs.Job(kind="sandbox_scan")
+    asyncio.run(jobs.run_sandbox_scan_job(job, "seeded_flask", Signals()))
+    assert job.status == "failed" and job.result is None
+    assert job.error == "Sandbox scan failed (ValueError; stage=none) before an instance ID was confirmed"
+
+
+def test_deterministic_source_tarball_is_byte_stable_and_safely_shaped(tmp_path):
+    payload_a = jobs.deterministic_source_tarball(jobs.SCAN_TARGETS["seeded_flask"])
+    payload_b = jobs.deterministic_source_tarball(str(jobs.SCAN_TARGETS["seeded_flask"]))
+    assert payload_a == payload_b and len(payload_a) < 1024 * 1024
+    assert payload_a[4:8] == b"\x00\x00\x00\x00"  # gzip MTIME is pinned
+    with tarfile.open(fileobj=io.BytesIO(payload_a), mode="r:gz") as archive:
+        members = archive.getmembers()
+    names = [member.name for member in members]
+    assert names == sorted(names)
+    assert {"app.py", "manifest.json", "requirements.txt", "docs/readme.txt", "app_secret.txt"} <= set(names)
+    assert not any("__pycache__" in name or name.startswith("/") or ".." in name.split("/") for name in names)
+    assert all(member.isfile() and member.mode == 0o644 and member.uid == 0 and member.gid == 0 and member.mtime == 0 and member.uname == "" for member in members)
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    with tarfile.open(fileobj=io.BytesIO(payload_a), mode="r:gz") as archive:
+        archive.extractall(staged, filter="data")
+    assert (staged / "app.py").read_bytes() == (jobs.SCAN_TARGETS["seeded_flask"] / "app.py").read_bytes()
+
+
+def test_deterministic_source_tarball_rejects_links_and_unbounded_layouts(tmp_path):
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    (linked / "app.py").write_text("x = 1\n")
+    (linked / "escape.py").symlink_to(linked / "app.py")
+    with pytest.raises(ValueError, match="links"):
+        jobs.deterministic_source_tarball(linked)
+    (linked / "escape.py").unlink()
+    (linked / ("a" * 100 + ".py")).write_text("x = 2\n")
+    with pytest.raises(ValueError, match="out of bounds"):
+        jobs.deterministic_source_tarball(linked)
+    huge = tmp_path / "huge"
+    huge.mkdir()
+    (huge / "app.py").write_text("x = 1\n")
+    (huge / "blob.bin").write_bytes(b"\x00" * (jobs.TARGET_SOURCE_MAX_BYTES + 1))
+    with pytest.raises(ValueError, match="too large"):
+        jobs.deterministic_source_tarball(huge)
+    with pytest.raises(ValueError, match="directory"):
+        jobs.deterministic_source_tarball(tmp_path / "missing")
+
+
+def test_registry_shares_one_disposable_vx1_between_smoke_and_scan():
+    registry = jobs.JobRegistry()
+    with pytest.raises(ValueError):
+        registry.create("sandbox_scan", signals=object(), target="unknown")
+    with pytest.raises(ValueError):
+        registry.create("sandbox_scan", target="seeded_flask")
+    registry.jobs["smoke"] = jobs.Job(kind="sandbox_smoke", status="running")
+    assert registry.create("sandbox_scan", signals=object(), target="seeded_flask") is None
+    assert registry.arm_sandbox(ttl_seconds=120) is None
+    registry.jobs["scan"] = jobs.Job(kind="sandbox_scan", status="running")
+    assert registry.create("sandbox_smoke", "A" * 36, object()) is None
+    registry.jobs["smoke"].status = "completed"
+    assert registry.arm_sandbox(ttl_seconds=120) is None  # the scan still holds the one VX1
+
+
+def test_sandbox_scan_route_arms_and_consumes_one_token_like_vpc_smoke(auth, monkeypatch):
+    seen = []
+
+    async def fake_scan(job, target, signals):
+        seen.append((target, signals))
+        job.result = {"destroyed": True, "vpc_ip": "10.52.0.3"}
+        await job.publish("completed")
+
+    monkeypatch.delenv("CERBERUS_ENABLE_SANDBOX_JOBS", raising=False)
+    for name, value in VPC_ENV.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(jobs, "run_sandbox_scan_job", fake_scan)
+    with TestClient(app) as client:
+        body = {"type": "sandbox_scan", "approve_vm": True, "target": "seeded_flask"}
+        assert client.post("/jobs", headers=auth, json=body).status_code == 503
+        armed = client.post("/jobs/arm-sandbox", headers=auth, json={"approve_vm": True})
+        assert armed.status_code == 201
+        token = armed.json()["arm_token"]
+        # Smoke-only options never apply to scans and must not consume the arm.
+        assert client.post("/jobs", headers=auth, json={**body, "arm_token": token, "diagnostic_upload": {"url": "https://x.ord1.vultrobjects.com/", "fields": {}}}).status_code == 400
+        assert client.post("/jobs", headers=auth, json={**body, "arm_token": token, "netbird_setup_key": "A" * 36}).status_code == 400
+        assert client.post("/jobs", headers=auth, json={**body, "arm_token": token, "target": "unknown"}).status_code == 400
+        assert client.post("/jobs", headers=auth, json={"type": "sandbox_scan", "target": "seeded_flask", "arm_token": token}).status_code == 400
+        assert client.post("/jobs", headers=auth, json={**body, "arm_token": "wrong"}).status_code == 403
+        started = client.post("/jobs", headers=auth, json={**body, "arm_token": token})
+        assert started.status_code == 202
+        job_id = started.json()["id"]
+        assert wait_for_terminal(client, job_id, auth)["status"] == "completed"
+        assert client.post("/jobs", headers=auth, json={**body, "arm_token": token}).status_code == 403
+        result = client.get(f"/jobs/{job_id}/result", headers=auth)
+        with client.websocket_connect(f"/jobs/{job_id}/events") as websocket:
+            websocket.send_json({"token": CONTROL_TOKEN})
+            events = [websocket.receive_json() for _ in range(2)]
+    assert len(seen) == 1
+    assert seen[0][0] == "seeded_flask"
+    from main import ready_signals
+    assert seen[0][1] is ready_signals
+    assert result.status_code == 200 and result.json()["destroyed"] is True
+    assert [event["status"] for event in events] == ["queued", "completed"]
+    assert token not in result.text + str(events)
+
+
+def test_enabled_sandbox_scan_needs_no_arm_but_still_requires_approval_and_vpc_config(auth, monkeypatch):
+    seen = []
+
+    async def fake_scan(job, target, signals):
+        seen.append(target)
+        job.result = {"destroyed": True}
+        await job.publish("completed")
+
+    monkeypatch.setenv("CERBERUS_ENABLE_SANDBOX_JOBS", "true")
+    monkeypatch.setattr(jobs, "run_sandbox_scan_job", fake_scan)
+    with TestClient(app) as client:
+        body = {"type": "sandbox_scan", "approve_vm": True, "target": "snipstash"}
+        for name in VPC_ENV:
+            monkeypatch.delenv(name, raising=False)
+        assert client.post("/jobs", headers=auth, json=body).status_code == 503
+        for name, value in VPC_ENV.items():
+            monkeypatch.setenv(name, value)
+        assert client.post("/jobs", headers=auth, json={**body, "arm_token": "unused"}).status_code == 400
+        assert client.post("/jobs", headers=auth, json={"type": "sandbox_scan", "target": "snipstash"}).status_code == 400
+        assert client.post("/jobs", headers=auth, json={"type": "sandbox_scan", "approve_vm": True}).status_code == 400
+        started = client.post("/jobs", headers=auth, json=body)
+        assert started.status_code == 202
+        assert wait_for_terminal(client, started.json()["id"], auth)["type"] == "sandbox_scan"
+    assert seen == ["snipstash"]

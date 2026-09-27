@@ -11,8 +11,18 @@ import httpx
 import pytest
 from botocore.config import Config
 
-from instance_lifecycle import ReadySignals, VultrInstances, block_public_ssh_user_data, docker_user_data, temporary_instance, verify_instance
+from instance_lifecycle import ReadySignals, VultrInstances, block_public_ssh_user_data, docker_user_data, temporary_instance, validated_presigned_source_get, verify_instance
 from main import BOOTSTRAP_STAGES, app, callback_app, control_server_app, ready_signals, vpc_callback_app
+
+TARGET_SOURCE_URL = (
+    "https://cerberus-target-src.ord1.vultrobjects.com/src/" + "b" * 32 + ".tgz"
+    "?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=test-access%2F20260927%2Ford1%2Fs3%2Faws4_request"
+    "&X-Amz-Date=20260927T000000Z&X-Amz-Expires=900&X-Amz-SignedHeaders=host&X-Amz-Signature=" + "a" * 64
+)
+
+
+def build_target_run(entrypoint="app.py"):
+    return {"source_url": TARGET_SOURCE_URL, "entrypoint": entrypoint}
 
 
 def build_fake_upload_form():
@@ -69,7 +79,6 @@ def test_create_uses_cloud_init_without_vultr_keys():
     assert "test -w /dev/kvm" in script
     assert "docker.io" in script
     assert "runsc install" in script
-    assert 'config["default-runtime"]="runsc"' in script
     assert "--runtime=runsc" in script
     assert "sh -c 'hostname; uname -a'" in script
     assert "docker info --format" in script
@@ -191,6 +200,8 @@ def test_netbird_test_rejects_open_env_permissions(monkeypatch, tmp_path):
 def test_private_ready_callback_requires_netbird_smoke_and_no_public_http():
     url = "http://100.124.55.15:8000/internal/ready"
     script = docker_user_data(url, "ready-token", True, "A" * 36, private_callback=True)
+    if "vpc_payload=$(python3 -c " in script:
+        script = unpack_vpc_payload(script)
     assert url in script
     assert "http://100.124.55.15:8000/internal/failed" in script
     assert "http://100.124.55.15:8000/internal/stage" in script
@@ -230,14 +241,16 @@ def test_private_ready_callback_rejects_other_targets(url):
 def test_vpc_callback_is_private_without_netbird_key_or_public_api():
     url = "http://10.52.0.2:8001/internal/ready"
     script = docker_user_data(url, "R" * 36, opensandbox_spike=True, vpc_callback=True, vpc_subnet="10.52.0.0/24")
-    assert url in script
-    assert "http://10.52.0.2:8001/internal/stage" in script
-    assert "http://10.52.0.2:8001/internal/failed" in script
-    assert "netbird up" not in script
-    assert "--subnet=172.29.240.0/24" in script
+    expanded = unpack_vpc_payload(script)
+    assert url in expanded
+    assert expanded.index("bootstrap_started") < expanded.index("apt-get update")
+    assert subprocess.run(["sh", "-n"], input=expanded, text=True, capture_output=True).returncode == 0
+    assert "http://10.52.0.2:8001/internal/stage" in expanded
+    assert "http://10.52.0.2:8001/internal/failed" in expanded
+    assert "netbird up" not in expanded
+    assert "--subnet=172.29.240.0/24" in expanded
     assert "bootstrap_started" in BOOTSTRAP_STAGES
-    assert script.index("bootstrap_started") < script.index("apt-get update")
-    assert "CERBERUS_STAGE=docker_install" in script
+    assert "CERBERUS_STAGE=docker_install" in expanded
     assert subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True).returncode == 0
     with pytest.raises(ValueError, match="VPC"):
         docker_user_data(url, "R" * 36, True, netbird_setup_key="A" * 36, vpc_callback=True, vpc_subnet="10.52.0.0/24")
@@ -596,8 +609,10 @@ def test_private_failure_callback_rejects_untrusted_details_and_signals_safe_sta
                 assert (await client.post(path, headers=headers, json={"stage": "arbitrary", "exit_code": 1})).status_code == 400
                 assert (await client.post(path, headers=headers, json={"stage": "isolation_probe", "exit_code": 0})).status_code == 400
                 assert (await client.post(path, headers=headers, json={"stage": "isolation_probe", "exit_code": 1, "secret": "should-not-arrive"})).status_code == 400
+                assert (await client.post(path, headers=headers, json={"stage": "isolation_probe", "exit_code": 1, "detail": "x" * 301})).status_code == 400
                 assert (await client.post(path, headers=headers, json={"stage": "isolation_probe", "exit_code": 1})).status_code == 204
-            assert await ready_signals.wait(token, timeout=0.1) == {"failure_stage": "isolation_probe", "exit_code": 1}
+                assert (await client.post(path, headers=headers, json={"stage": "isolation_probe", "exit_code": 1, "detail": "container=exited exit=1"})).status_code == 204
+            assert await ready_signals.wait(token, timeout=0.1) == {"failure_stage": "isolation_probe", "exit_code": 1, "failure_detail": "container=exited exit=1"}
         finally:
             ready_signals.unregister(token)
 
@@ -675,3 +690,231 @@ def test_ready_timeout():
             signals.unregister(token)
 
     asyncio.run(request())
+
+
+# --- Disposable VPC target runs: seeded scans execute off the control host ---
+
+def test_target_run_user_data_builds_gvisor_target_bound_only_to_the_vpc_ip():
+    script = docker_user_data(
+        "http://10.52.0.2:8001/internal/ready", "R" * 43,
+        vpc_callback=True, vpc_subnet="10.52.0.0/24", target_run=build_target_run(),
+    )
+    assert len(base64.b64encode(script.encode())) < 16 * 1024
+    expanded = unpack_vpc_payload(script)
+    assert subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True).returncode == 0
+    assert subprocess.run(["sh", "-n"], input=expanded, text=True, capture_output=True).returncode == 0
+    assert expanded.index("systemctl stop ssh.socket ssh.service") < expanded.index("apt-get update")
+    assert expanded.index("bootstrap_started") < expanded.index("apt-get update")
+    assert "apt-get install -y curl ca-certificates gnupg" in expanded
+    assert "apt-get install -y docker.io" in expanded
+    assert "apt-get install -y runsc" in expanded and 'default-runtime' not in expanded
+    # The target source arrives only through the single-object presigned GET.
+    assert TARGET_SOURCE_URL in expanded
+    assert "tar -xzf /root/target.tgz -C /root/target --no-same-owner" in expanded
+    # The minimal image and its detached gVisor run bind only the guest VPC IPv4.
+    assert "FROM python:3.12-slim" in expanded
+    assert "pip install --no-cache-dir" in expanded and "requirements.txt" in expanded
+    assert 'ENTRYPOINT ["python", "app.py"]' in expanded
+    assert "docker run -d --runtime=runsc" in expanded
+    assert '-p "$vpc_ip":8081:8081' in expanded and '-p "0.0.0.0' not in expanded and "-p 8081" not in expanded
+    assert "ip', '-j', '-4', 'addr'" in expanded
+    assert "iptables -I INPUT -p tcp -s 10.52.0.0/24 --dport 8081 -j ACCEPT" in expanded
+    assert 'curl -fsS --max-time 10 "http://$vpc_ip:8081/health"' in expanded
+    assert "http://10.52.0.2:8001/internal/ready" in expanded
+    assert "proof['target'] = 'healthy'" in expanded
+    # No OpenSandbox server or isolation probe, no NetBird, no cloud keys.
+    assert "opensandbox" not in expanded and "netbird" not in expanded and "account-key" not in expanded
+    assert {line.split()[-1] for line in expanded.splitlines() if line.startswith("cerberus_report_stage ")} <= BOOTSTRAP_STAGES
+    blocks = expanded.split("python3 - <<'PY'\n")[1:]
+    assert len(blocks) == 3
+    for block in blocks:
+        ast.parse(block.split("\nPY\n", 1)[0])
+
+
+def test_target_vpc_ip_derivation_uses_the_verified_private_guest_address(monkeypatch, capsys):
+    script = docker_user_data(
+        "http://10.52.0.2:8001/internal/ready", "R" * 43,
+        vpc_callback=True, vpc_subnet="10.52.0.0/24", target_run=build_target_run(),
+    )
+    expanded = unpack_vpc_payload(script)
+    code = expanded.split("vpc_ip=$(python3 - <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    interfaces = [
+        {"ifname": "lo", "addr_info": [{"family": "inet", "local": "127.0.0.1"}]},
+        {"ifname": "ens7", "addr_info": [{"family": "inet", "local": "10.52.0.4"}, {"family": "inet6", "local": "fe80::1"}]},
+    ]
+    captured = {}
+
+    def check_output(cmd, **kwargs):
+        captured.update(cmd=cmd)
+        assert kwargs.get("timeout") == 5
+        return json.dumps(interfaces)
+
+    monkeypatch.setattr(subprocess, "check_output", check_output)
+    exec(compile(code, "<target-vpc-ip>", "exec"), {})
+    assert captured["cmd"][:3] == ["ip", "-j", "-4"]
+    assert capsys.readouterr().out.strip() == "10.52.0.4"
+
+    ambiguous = interfaces + [{"ifname": "ens8", "addr_info": [{"family": "inet", "local": "10.52.0.5"}]}]
+    monkeypatch.setattr(subprocess, "check_output", lambda cmd, **kwargs: json.dumps(ambiguous))
+    with pytest.raises(AssertionError):
+        exec(compile(code, "<target-vpc-ip-ambiguous>", "exec"), {})
+
+
+def test_target_ready_proof_merges_the_verified_vpc_endpoint(monkeypatch, capsys):
+    script = docker_user_data(
+        "http://10.52.0.2:8001/internal/ready", "R" * 43,
+        vpc_callback=True, vpc_subnet="10.52.0.0/24", target_run=build_target_run(),
+    )
+    expanded = unpack_vpc_payload(script)
+    code = expanded.split("proof=$(PROOF=\"$proof\" VPC_IP=\"$vpc_ip\" python3 - <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    base_proof = {
+        "hostname": "vx1", "uname": "Linux vx1", "cpu_virt": "svm", "kvm_device": True, "kvm_access": True,
+        "runtime": "runsc", "sandbox_hostname": "smoke", "sandbox_uname": "Linux gvisor", "exit_code": 0,
+    }
+    monkeypatch.setenv("PROOF", json.dumps(base_proof))
+    monkeypatch.setenv("VPC_IP", "10.52.0.4")
+    exec(compile(code, "<target-proof>", "exec"), {})
+    merged = json.loads(capsys.readouterr().out)
+    assert merged == {**base_proof, "vpc_ip": "10.52.0.4", "target": "healthy", "endpoint": "http://10.52.0.4:8081"}
+
+
+def test_target_run_keeps_the_presigned_nic_probe_within_budget():
+    script = docker_user_data(
+        "http://10.52.0.2:8001/internal/ready", "R" * 43,
+        vpc_callback=True, vpc_subnet="10.52.0.0/24",
+        diagnostic_upload=build_fake_upload_form(), target_run=build_target_run(),
+    )
+    assert len(base64.b64encode(script.encode())) < 16 * 1024
+    expanded = unpack_vpc_payload(script)
+    assert subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True).returncode == 0
+    assert subprocess.run(["sh", "-n"], input=expanded, text=True, capture_output=True).returncode == 0
+    assert expanded.index("form=json.loads") < expanded.index("apt-get update")
+    assert TARGET_SOURCE_URL in expanded
+
+
+def test_target_run_requires_the_keyless_vpc_path():
+    with pytest.raises(ValueError, match="VPC target runs"):
+        docker_user_data("https://cerberus.example/internal/ready", "ready-token", target_run=build_target_run())
+    with pytest.raises(ValueError, match="VPC"):
+        docker_user_data("http://10.52.0.2:8001/internal/ready", "R" * 43, target_run=build_target_run(), vpc_subnet="10.52.0.0/24")
+
+
+@pytest.mark.parametrize("options,message", [
+    ({"opensandbox_spike": True}, "VPC target runs"),
+    ({"netbird_setup_key": "A" * 36}, "NetBird|VPC target runs"),
+    ({"private_callback": True}, "VPC target runs"),
+])
+def test_target_run_cannot_mix_with_smoke_modes(options, message):
+    with pytest.raises(ValueError, match=message):
+        docker_user_data(
+            "http://10.52.0.2:8001/internal/ready", "R" * 43,
+            vpc_callback=True, vpc_subnet="10.52.0.0/24", target_run=build_target_run(), **options,
+        )
+
+
+@pytest.mark.parametrize("entrypoint", ["../app.py", "sub/app.py", "a..b.py", "app.py;id", "app.py$(id)", "-m", "", ".py", "x" * 80])
+def test_target_run_rejects_unsafe_or_ambiguous_entrypoints(entrypoint):
+    with pytest.raises(ValueError):
+        docker_user_data(
+            "http://10.52.0.2:8001/internal/ready", "R" * 43,
+            vpc_callback=True, vpc_subnet="10.52.0.0/24", target_run=build_target_run(entrypoint),
+        )
+
+
+def test_target_run_rejects_unknown_options_and_unvalidated_urls():
+    with pytest.raises(ValueError):
+        docker_user_data(
+            "http://10.52.0.2:8001/internal/ready", "R" * 43, vpc_callback=True, vpc_subnet="10.52.0.0/24",
+            target_run={**build_target_run(), "args": ["--debug"]},
+        )
+    for bad in (
+        TARGET_SOURCE_URL.replace("https://", "http://"),
+        TARGET_SOURCE_URL.replace("/src/", "/src/../"),
+        TARGET_SOURCE_URL.replace("ord1.vultrobjects.com", "storage.evil.example"),
+        TARGET_SOURCE_URL.split("?")[0],
+        TARGET_SOURCE_URL.replace("X-Amz-Expires=900", "X-Amz-Expires=3600"),
+    ):
+        with pytest.raises(ValueError):
+            docker_user_data(
+                "http://10.52.0.2:8001/internal/ready", "R" * 43, vpc_callback=True, vpc_subnet="10.52.0.0/24",
+                target_run={"source_url": bad},
+            )
+
+
+def test_presigned_source_get_strict_shape():
+    assert validated_presigned_source_get(TARGET_SOURCE_URL) == TARGET_SOURCE_URL
+    with pytest.raises(ValueError):
+        validated_presigned_source_get(None)
+
+
+def test_presigned_source_url_is_redacted_from_vultr_validation_errors():
+    def respond(request):
+        return httpx.Response(400, json={"error": "Invalid source " + TARGET_SOURCE_URL + " with account-key"})
+
+    async def request():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            await VultrInstances(client, "account-key").create(
+                "ord", "vx1-g-2c-8g-120s", 2284, "http://10.52.0.2:8001/internal/ready", "R" * 43,
+                vpc_callback=True, vpc_subnet="10.52.0.0/24", vpc_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                target_run=build_target_run(),
+            )
+
+    with pytest.raises(ValueError) as error:
+        asyncio.run(request())
+    assert TARGET_SOURCE_URL not in str(error.value)
+    assert "account-key" not in str(error.value)
+
+
+def test_create_disposable_target_instance_attaches_vpc_and_embeds_target_run():
+    vpc_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(202, json={"instance": {"id": "instance-123"}})
+
+    async def request():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await VultrInstances(client, "account-key").create(
+                "ord", "vx1-g-2c-8g-120s", 2284, "http://10.52.0.2:8001/internal/ready", "R" * 43,
+                vpc_callback=True, vpc_subnet="10.52.0.0/24", vpc_id=vpc_id, target_run=build_target_run(),
+            )
+
+    assert asyncio.run(request()) == "instance-123"
+    payload = json.loads(requests[0].content)
+    assert payload["attach_vpc"] == [vpc_id]
+    script = base64.b64decode(payload["user_data"]).decode()
+    assert TARGET_SOURCE_URL not in script  # compressed tail hides the one presigned credential
+    expanded = unpack_vpc_payload(script)
+    assert TARGET_SOURCE_URL in expanded
+    assert "--runtime=runsc" in expanded and "netbird up" not in expanded
+
+
+def test_target_ready_proof_binds_healthy_endpoint_to_the_private_vpc_ip():
+    proof = {
+        "hostname": "vx1-test", "uname": "Linux vx1-test x86_64", "cpu_virt": "svm",
+        "kvm_device": True, "kvm_access": True, "runtime": "runsc",
+        "sandbox_hostname": "sandbox-test", "sandbox_uname": "Linux gvisor", "exit_code": 0,
+        "vpc_ip": "10.52.0.3", "target": "healthy", "endpoint": "http://10.52.0.3:8081",
+    }
+
+    async def request():
+        token = ready_signals.register()
+        try:
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=vpc_callback_app), base_url="http://10.52.0.2:8001") as client:
+                headers = {"Authorization": f"Bearer {token}"}
+                degraded = await client.post("/internal/ready", headers=headers, json={**proof, "target": "degraded"})
+                wrong_ip = await client.post("/internal/ready", headers=headers, json={**proof, "endpoint": "http://10.52.0.4:8081"})
+                public = await client.post("/internal/ready", headers=headers, json={**proof, "endpoint": "http://192.0.2.10:8081"})
+                no_vpc = await client.post("/internal/ready", headers=headers, json={k: v for k, v in proof.items() if k != "vpc_ip"})
+                wrong_port = await client.post("/internal/ready", headers=headers, json={**proof, "endpoint": "http://10.52.0.3:8080"})
+                stage = await client.post("/internal/stage", headers=headers, json={"stage": "target_health"})
+                valid = await client.post("/internal/ready", headers=headers, json=proof)
+            result = await ready_signals.wait(token, timeout=0.1)
+            return [r.status_code for r in (degraded, wrong_ip, public, no_vpc, wrong_port, stage, valid)], result
+        finally:
+            ready_signals.unregister(token)
+
+    statuses, result = asyncio.run(request())
+    assert statuses == [400, 400, 400, 400, 400, 204, 204]
+    assert result["target"] == "healthy" and result["endpoint"] == "http://10.52.0.3:8081" and result["vpc_ip"] == "10.52.0.3"

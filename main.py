@@ -21,12 +21,13 @@ BOOTSTRAP_STAGES = frozenset({
     "network_create", "opensandbox_config", "opensandbox_server", "isolation_probe",
     "bridge_inspect", "firewall_ipv4", "firewall_ipv6", "sandbox_create",
     "docker_isolation", "smoke_command", "external_probe", "dns_probe", "host_probe",
+    "target_fetch", "target_build", "target_start", "target_health",
     "ready_callback",
 })
 
 
 class JobRequest(BaseModel):
-    type: Literal["connectivity", "sandbox_smoke", "scan"]
+    type: Literal["connectivity", "sandbox_smoke", "scan", "sandbox_scan"]
     approve_vm: StrictBool = False
     netbird_setup_key: SecretStr | None = None
     arm_token: SecretStr | None = None
@@ -115,6 +116,10 @@ async def instance_ready(request: Request, authorization: str | None = Header(de
             raise HTTPException(status_code=400)
         if not isinstance(address, ipaddress.IPv4Address) or not any(address in ipaddress.ip_network(block) for block in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")):
             raise HTTPException(status_code=400)
+    if "target" in proof:
+        vpc_ip = proof.get("vpc_ip")
+        if proof["target"] != "healthy" or not isinstance(vpc_ip, str) or proof.get("endpoint") != f"http://{vpc_ip}:8081":
+            raise HTTPException(status_code=400)
     if not ready_signals.signal(token, proof):
         raise HTTPException(status_code=404)
     return Response(status_code=204)
@@ -143,20 +148,26 @@ async def instance_failed(request: Request, authorization: str | None = Header(d
     token = authorization[7:] if authorization and authorization.startswith("Bearer ") else ""
     if not ready_signals.has(token):
         raise HTTPException(status_code=404)
-    if len(await request.body()) > 512:
+    if len(await request.body()) > 1024:
         raise HTTPException(status_code=413)
     try:
         report = await request.json()
     except ValueError:
         raise HTTPException(status_code=400)
     if (
-        not isinstance(report, dict) or set(report) != {"stage", "exit_code"}
+        not isinstance(report, dict) or not set(report) <= {"stage", "exit_code", "detail"}
         or not isinstance(report["stage"], str)
         or report["stage"] not in BOOTSTRAP_STAGES
         or type(report["exit_code"]) is not int or not 1 <= report["exit_code"] <= 255
     ):
         raise HTTPException(status_code=400)
-    if not ready_signals.signal(token, {"failure_stage": report["stage"], "exit_code": report["exit_code"]}):
+    detail = report.get("detail")
+    if detail is not None and (not isinstance(detail, str) or len(detail) > 300 or not detail.isprintable()):
+        raise HTTPException(status_code=400)
+    proof = {"failure_stage": report["stage"], "exit_code": report["exit_code"]}
+    if detail:
+        proof["failure_detail"] = detail
+    if not ready_signals.signal(token, proof):
         raise HTTPException(status_code=404)
     return Response(status_code=204)
 
@@ -271,6 +282,26 @@ async def start_job(request: JobRequest, authorization: str | None = Header(defa
                 if hold is None:
                     raise HTTPException(status_code=403, detail="Sandbox arm is invalid or expired")
                 job = job_registry.create(request.type, None, ready_signals, vpc_mode=True, diagnostic_hold_seconds=hold, diagnostic_upload=request.diagnostic_upload)
+    elif request.type == "sandbox_scan":
+        if request.netbird_setup_key is not None or request.diagnostic_upload is not None:
+            raise HTTPException(status_code=400, detail="Sandbox scans do not accept smoke diagnostics or setup keys")
+        if request.target not in SCAN_TARGETS:
+            raise HTTPException(status_code=400, detail="Unknown scan target")
+        enabled = os.getenv("CERBERUS_ENABLE_SANDBOX_JOBS") == "true"
+        if not enabled and request.arm_token is None:
+            raise HTTPException(status_code=503, detail="Sandbox jobs are disabled")
+        if enabled and request.arm_token is not None:
+            raise HTTPException(status_code=400, detail="Sandbox arm is unnecessary while jobs are enabled")
+        if request.approve_vm is not True:
+            raise HTTPException(status_code=400, detail="Explicit VM approval required")
+        if not all(os.getenv(name) for name in ("CERBERUS_VPC_ID", "CERBERUS_CONTROL_INSTANCE_ID", "CERBERUS_CONTROL_VPC_IP", "CERBERUS_VPC_SUBNET")):
+            raise HTTPException(status_code=503, detail="VPC sandbox jobs are not configured")
+        if enabled:
+            job = job_registry.create(request.type, signals=ready_signals, target=request.target)
+        else:
+            if job_registry.consume_sandbox_arm(request.arm_token.get_secret_value()) is None:
+                raise HTTPException(status_code=403, detail="Sandbox arm is invalid or expired")
+            job = job_registry.create(request.type, signals=ready_signals, target=request.target)
     elif request.type == "scan":
         if request.approve_vm or request.netbird_setup_key is not None or request.arm_token is not None or request.diagnostic_upload is not None:
             raise HTTPException(status_code=400, detail="Scan jobs do not accept sandbox credentials")
