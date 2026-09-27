@@ -417,6 +417,9 @@ def test_private_sandbox_bootstrap_stays_within_conservative_user_data_budget(ad
 
 def test_vpc_bootstrap_embedded_python_is_valid_and_excludes_netbird_enrolment():
     script = docker_user_data("http://10.52.0.2:8001/internal/ready", "R" * 36, True, vpc_callback=True, vpc_subnet="10.52.0.0/24")
+    head, wrapped = script.split("vpc_payload=$(python3 -c ", 1)
+    blob = wrapped.split(") && eval", 1)[0].rsplit(" ", 1)[-1]
+    script = head + zlib.decompress(base64.b64decode(blob)).decode()
     encoded = script.split("printf '%s' ", 1)[1].split(" | base64 -d |", 1)[0]
     module = zlib.decompress(base64.b64decode(encoded)).decode()
     config = script.split("PYTHONPATH=/root python3 - <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]

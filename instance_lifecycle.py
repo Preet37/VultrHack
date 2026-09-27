@@ -277,7 +277,7 @@ def docker_user_data(callback_url, ready_token, opensandbox_spike=False, netbird
         f"-H {auth_header} -H 'Content-Type: application/json' "
         f"--data-binary \"$proof\" {shlex.quote(callback_url)}\n"
     )
-    if diagnostic_upload is not None:
+    if vpc_callback:
         head, tail = script[:compressed_tail_start], script[compressed_tail_start:]
         compressed = base64.b64encode(zlib.compress(tail.encode(), level=9)).decode()
         decode = "import base64,sys,zlib;sys.stdout.buffer.write(zlib.decompress(base64.b64decode(sys.argv[1])))"

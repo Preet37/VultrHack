@@ -308,6 +308,10 @@ def opensandbox_spike_user_data(netbird=False, report_stages=False, vpc_subnet=N
     config_args = ", netbird_status=status" if netbird else f", vpc_address=vpc_ip, vpc_subnet={vpc_subnet!r}" if vpc_subnet else ""
     proof_line = 'data["netbird_ip"] = tomllib.loads(Path("/root/.sandbox.toml").read_text())["server"]["host"]; ' if netbird else 'data["vpc_ip"] = tomllib.loads(Path("/root/.sandbox.toml").read_text())["server"]["host"]; ' if vpc_subnet else ""
     subnet_option = f"--subnet={VPC_INTERNAL_SUBNET} " if vpc_subnet else ""
+    firewall_line = (
+        f"command -v iptables >/dev/null 2>&1 && iptables -I INPUT -p tcp -s {vpc_subnet} --dport 8080 -j ACCEPT || :\n"
+        if vpc_subnet else ""
+    )
     script = (
         f"printf '%s' {shlex.quote(source)} | base64 -d | python3 -c 'import sys,zlib; sys.stdout.buffer.write(zlib.decompress(sys.stdin.buffer.read()))' > /root/sandbox_platform.py\n"
         f"{stage_line('opensandbox_dependencies')}"
@@ -339,6 +343,7 @@ def opensandbox_spike_user_data(netbird=False, report_stages=False, vpc_subnet=N
         "server_host=$(python3 -c 'import tomllib; from pathlib import Path; print(tomllib.loads(Path(\"/root/.sandbox.toml\").read_text())[\"server\"][\"host\"])')\n"
         "for attempt in $(seq 1 45); do if curl -fsS \"http://$server_host:8080/health\" >/dev/null 2>&1; then break; fi; sleep 2; done\n"
         "curl -fsS \"http://$server_host:8080/health\" >/dev/null\n"
+        f"{firewall_line}"
         f"{stage_line('isolation_probe')}"
         "/root/opensandbox-venv/bin/python3 - <<'PY'\n"
         "import asyncio\n"

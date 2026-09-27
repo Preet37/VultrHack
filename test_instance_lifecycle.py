@@ -230,14 +230,16 @@ def test_private_ready_callback_rejects_other_targets(url):
 def test_vpc_callback_is_private_without_netbird_key_or_public_api():
     url = "http://10.52.0.2:8001/internal/ready"
     script = docker_user_data(url, "R" * 36, opensandbox_spike=True, vpc_callback=True, vpc_subnet="10.52.0.0/24")
-    assert url in script
-    assert "http://10.52.0.2:8001/internal/stage" in script
-    assert "http://10.52.0.2:8001/internal/failed" in script
-    assert "netbird up" not in script
-    assert "--subnet=172.29.240.0/24" in script
+    expanded = unpack_vpc_payload(script)
+    assert url in expanded
+    assert expanded.index("bootstrap_started") < expanded.index("apt-get update")
+    assert subprocess.run(["sh", "-n"], input=expanded, text=True, capture_output=True).returncode == 0
+    assert "http://10.52.0.2:8001/internal/stage" in expanded
+    assert "http://10.52.0.2:8001/internal/failed" in expanded
+    assert "netbird up" not in expanded
+    assert "--subnet=172.29.240.0/24" in expanded
     assert "bootstrap_started" in BOOTSTRAP_STAGES
-    assert script.index("bootstrap_started") < script.index("apt-get update")
-    assert "CERBERUS_STAGE=docker_install" in script
+    assert "CERBERUS_STAGE=docker_install" in expanded
     assert subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True).returncode == 0
     with pytest.raises(ValueError, match="VPC"):
         docker_user_data(url, "R" * 36, True, netbird_setup_key="A" * 36, vpc_callback=True, vpc_subnet="10.52.0.0/24")
