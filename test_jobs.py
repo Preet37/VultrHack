@@ -4,7 +4,9 @@ import io
 import json
 import re
 import secrets
+import shutil
 import tarfile
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -18,6 +20,8 @@ from starlette.websockets import WebSocketDisconnect
 
 import diagnostic_run
 import finder.pipeline
+import finder.remediate
+import instance_lifecycle
 import jobs
 from diagnostic_receiver import validated_nic_report
 from diagnostic_run import main as diagnostic_main, validated_operator_url
@@ -749,10 +753,10 @@ class FakeScanStorage:
         self.objects.pop((Bucket, Key), None)
 
 
-def fake_scan_proof(vpc_ip="10.52.0.3", target="healthy"):
+def fake_scan_proof(vpc_ip="10.52.0.3", target="healthy", runtime="runsc"):
     return {
         "hostname": "vx1", "uname": "Linux vx1", "cpu_virt": "svm", "kvm_device": True, "kvm_access": True,
-        "runtime": "runsc", "sandbox_hostname": "smoke", "sandbox_uname": "Linux gvisor", "exit_code": 0,
+        "runtime": runtime, "sandbox_hostname": "smoke", "sandbox_uname": "Linux gvisor", "exit_code": 0,
         "vpc_ip": vpc_ip, "target": target, "endpoint": f"http://{vpc_ip}:8081",
     }
 
@@ -775,26 +779,37 @@ def fake_finder_report(target):
     )
 
 
-def run_fake_sandbox_scan(monkeypatch, proof, target_name="seeded_flask"):
-    state = {"calls": [], "scripts": [], "scanned": [], "storage": [], "destroyed": False}
+def run_fake_sandbox_scan(monkeypatch, proof, target_name="seeded_flask", remediate=False, second_proof=None, finder_report=None, batch_raises=False, target_runtime="gvisor"):
+    state = {"calls": [], "scripts": [], "scanned": [], "storage": [], "destroyed": False, "second_tokens": []}
 
     class Signals:
         registered = False
         unregistered = False
+        registered_tokens = []
+        unregistered_tokens = []
+        wait_calls = []
 
         def register(self):
             self.registered = True
-            return "R" * 43
+            token = "R" * 43 if not self.registered_tokens else "S" * 43
+            self.registered_tokens.append(token)
+            if token == "S" * 43:
+                state["second_tokens"].append(token)
+            return token
 
         async def wait(self, token, timeout):
             assert timeout == 600
-            return proof
+            self.wait_calls.append(token)
+            return (second_proof if second_proof is not None else proof) if token == "S" * 43 else proof
 
         def stage(self, token):
             return None
 
         def unregister(self, token):
             self.unregistered = True
+            self.unregistered_tokens.append(token)
+            if token == "S" * 43:
+                state["second_unregistered"] = token
 
     signals = Signals()
 
@@ -813,6 +828,7 @@ def run_fake_sandbox_scan(monkeypatch, proof, target_name="seeded_flask"):
             assert payload["attach_vpc"] == [VPC_ENV["CERBERUS_VPC_ID"]]
             assert len(payload["user_data"]) < 16 * 1024
             state["scripts"].append(unpack_vpc_payload(base64.b64decode(payload["user_data"]).decode()))
+            state["destroyed"] = False  # a fresh cycle: the prior 404 must not leak into it
             return httpx.Response(202, json={"instance": {"id": "instance-123"}})
         if path == "/v2/instances/instance-123/vpcs":
             return httpx.Response(200, json={"vpcs": [{"id": VPC_ENV["CERBERUS_VPC_ID"], "ip_address": "10.52.0.3"}]})
@@ -845,11 +861,51 @@ def run_fake_sandbox_scan(monkeypatch, proof, target_name="seeded_flask"):
 
     def fake_run_finder(base_url, source_dir, **kwargs):
         state["scanned"].append((base_url, source_dir, kwargs))
-        return fake_finder_report(base_url)
+        return finder_report if finder_report is not None else fake_finder_report(base_url)
 
     monkeypatch.setattr(finder.pipeline, "run_finder", fake_run_finder)
+
+    if remediate:
+
+        def fake_remediate_batch(findings, source_dir, *, timeout=12.0, launcher=None):
+            """Exercise the real launcher seam exactly like remediate_batch does."""
+            assert launcher is not None
+            state["remediated"] = ([finding.id for finding in findings], source_dir, timeout)
+            if batch_raises:
+                raise RuntimeError("y" * 400)
+            with tempfile.TemporaryDirectory() as tmp:
+                dst = Path(tmp) / "target"
+                shutil.copytree(source_dir, dst)
+                try:
+                    base_url, stop = launcher(dst, "app.py")
+                except Exception as exc:
+                    return [
+                        finder.remediate.RemediationResult(
+                            finding_id=finding.id, vuln_class=finding.vuln_class,
+                            endpoint=finding.endpoint, param=finding.param,
+                            validation_notes=f"shared launch failed: {exc}"[:200],
+                        )
+                        for finding in findings
+                    ], False
+                try:
+                    state["relauncher_base"] = base_url
+                    return [
+                        finder.remediate.RemediationResult(
+                            finding_id=finding.id, vuln_class=finding.vuln_class,
+                            endpoint=finding.endpoint, param=finding.param,
+                            patched=True, patch_source="deterministic-template",
+                            reexploit_blocked=True, functional_ok=True, validated=True,
+                            validation_notes="v" * 300,
+                        )
+                        for finding in findings
+                    ], True
+                finally:
+                    stop()
+
+        monkeypatch.setattr(finder.remediate, "remediate_batch", fake_remediate_batch)
+
     job = jobs.Job(kind="sandbox_scan")
-    asyncio.run(jobs.run_sandbox_scan_job(job, target_name, signals))
+    asyncio.run(jobs.run_sandbox_scan_job(job, target_name, signals, target_runtime=target_runtime, remediate=remediate))
     assert signals.registered
     assert signals.unregistered
     return job, state
@@ -920,7 +976,127 @@ def test_sandbox_scan_worker_fails_before_provisioning_without_storage_config(mo
     job = jobs.Job(kind="sandbox_scan")
     asyncio.run(jobs.run_sandbox_scan_job(job, "seeded_flask", Signals()))
     assert job.status == "failed" and job.result is None
-    assert job.error == "Sandbox scan failed (ValueError; stage=none) before an instance ID was confirmed"
+    assert job.error == "Sandbox scan failed (ValueError; stage=none; message=Sandbox scan object storage is not configured) before an instance ID was confirmed"
+
+
+def test_sandbox_scan_without_remediate_runs_one_vx1_and_reports_no_remediation(monkeypatch):
+    job, state = run_fake_sandbox_scan(monkeypatch, fake_scan_proof())
+    assert job.status == "completed"
+    assert "remediation" not in job.result
+    assert [call[0] for call in state["calls"]].count("POST") == 1
+    assert [call[0] for call in state["calls"]].count("DELETE") == 1
+    assert len(state["storage"]) == 1 and state["second_tokens"] == []
+    assert "remediating" not in [event["step"] for event in job.events]
+
+
+def test_sandbox_scan_remediate_reexploits_the_shared_patch_on_a_second_disposable_vx1(monkeypatch):
+    job, state = run_fake_sandbox_scan(monkeypatch, fake_scan_proof(), remediate=True)
+    assert job.status == "completed" and job.error is None
+    assert [event["step"] for event in job.events] == [
+        "sandbox_scan", "preflight", "provisioning", "bootstrap", "scanning", "teardown", "remediating", "complete",
+    ]
+    # Two full create/destroy cycles hit the provider, and the second destroy
+    # is followed by its own independent 404 confirmation, not the scan's one.
+    posts = [call for call in state["calls"] if call[0] == "POST"]
+    deletes = [call for call in state["calls"] if call[0] == "DELETE"]
+    assert len(posts) == 2 and len(deletes) == 2
+    last_delete = max(index for index, call in enumerate(state["calls"]) if call[0] == "DELETE")
+    tail = state["calls"][last_delete + 1:]
+    assert len(tail) >= 2 and all(call == ("GET", "api.vultr.com", "/v2/instances/instance-123") for call in tail)
+    # Each VX1 staged its own distinct object, and both objects are gone.
+    assert len(state["storage"]) == 2
+    first_keys = [key for _, key in state["storage"][0].deleted]
+    second_keys = [key for _, key in state["storage"][1].deleted]
+    assert len(first_keys) == 1 and len(second_keys) == 1 and first_keys[0] != second_keys[0]
+    assert state["storage"][0].objects == {} and state["storage"][1].objects == {}
+    # The second VX1's bootstrap fetched the SECOND presigned object.
+    assert first_keys[0] in state["scripts"][0] and first_keys[0] not in state["scripts"][1]
+    assert second_keys[0] in state["scripts"][1]
+    # ...and its readiness proof was waited out on a FRESH registry, never the
+    # scan-phase token.
+    assert state["second_tokens"] == ["S" * 43] and state["second_unregistered"] == "S" * 43
+    # The shared patched copy was hosted exactly once, on the second VX1.
+    assert state["remediated"] == (["sqli-1"], str(jobs.SCAN_TARGETS["seeded_flask"]), 12.0)
+    assert state["relauncher_base"] == "http://10.52.0.3:8081"
+    remediation = job.result["remediation"]
+    assert remediation["attempted"] == 1 and remediation["certified"] == 1
+    assert remediation["re-exploit_sandboxed"] is True and remediation["shared_functional"] is True
+    assert remediation["results"] == [{
+        "finding_id": "sqli-1", "vuln_class": "sqli", "patched": True,
+        "patch_source": "deterministic-template", "reexploit_blocked": True,
+        "functional_ok": True, "validated": True, "validation_notes": "v" * 200,
+    }]
+    for leaked in ("account-key", "test-secret", "R" * 43, "S" * 43):
+        assert leaked not in str(job.result)
+
+
+def test_sandbox_scan_remediate_reuses_the_requested_target_runtime_for_the_reexploit(monkeypatch):
+    job, state = run_fake_sandbox_scan(
+        monkeypatch, fake_scan_proof(runtime="microsandbox"), target_name="snipstash",
+        remediate=True, target_runtime="microsandbox",
+    )
+    assert job.status == "completed"
+    assert job.result["target_runtime"] == "microsandbox"
+    # Both VX1 bootstraps ran the KVM microVM target, not the docker/runsc one.
+    for script in state["scripts"]:
+        assert "msb create --name cerberus-target" in script and "--runtime=runsc" not in script
+    assert job.result["remediation"]["re-exploit_sandboxed"] is True
+
+
+def test_sandbox_scan_remediate_with_no_findings_never_boots_a_second_vx1(monkeypatch):
+    report = FinderReport(
+        target="http://10.52.0.3:8081", findings=[],
+        coverage=Coverage(
+            classes_tested=["sqli"], endpoints_tested=["/product"], candidates_seen=3,
+            candidates_tested=1, not_reached=["ssrf"], steps_used=1, wall_clock_seconds=0.5,
+        ),
+        triage_source="offline-heuristic",
+    )
+    job, state = run_fake_sandbox_scan(monkeypatch, fake_scan_proof(), remediate=True, finder_report=report)
+    assert job.status == "completed"
+    assert job.result["confirmed_findings"] == 0 and "remediation" not in job.result
+    assert "remediating" not in [event["step"] for event in job.events]
+    assert [call[0] for call in state["calls"]].count("POST") == 1
+    assert len(state["storage"]) == 1 and state["second_tokens"] == []
+
+
+def test_sandbox_scan_remediate_second_vx1_failure_is_destroyed_and_never_certified(monkeypatch):
+    job, state = run_fake_sandbox_scan(
+        monkeypatch, fake_scan_proof(), remediate=True,
+        second_proof={"failure_stage": "target_health", "exit_code": 7},
+    )
+    # The scan stands on its own; the re-exploit honestly reports nothing
+    # certified off a patched app that never became healthy in its sandbox.
+    assert job.status == "completed"
+    remediation = job.result["remediation"]
+    assert remediation["re-exploit_sandboxed"] is True
+    assert remediation["certified"] == 0 and remediation["shared_functional"] is False
+    assert remediation["results"][0]["reexploit_blocked"] is False
+    assert remediation["results"][0]["validated"] is False and remediation["results"][0]["patched"] is False
+    # The partial second VX1 was still destroyed, with its own 404 confirmation,
+    # and the second staged object was deleted.
+    deletes = [call for call in state["calls"] if call[0] == "DELETE"]
+    assert len(deletes) == 2 and all(call[2] == "/v2/instances/instance-123" for call in deletes)
+    last_delete = max(index for index, call in enumerate(state["calls"]) if call[0] == "DELETE")
+    confirmations = [
+        call for call in state["calls"][last_delete:]
+        if call[0] == "GET" and call[2] == "/v2/instances/instance-123"
+    ]
+    assert confirmations and state["destroyed"] is True
+    assert len(state["storage"]) == 2 and len(state["storage"][1].deleted) == 1
+    assert state["storage"][1].objects == {}
+    assert state["second_unregistered"] == "S" * 43
+
+
+def test_sandbox_scan_remediate_worker_error_keeps_the_bounded_error_convention(monkeypatch):
+    job, state = run_fake_sandbox_scan(monkeypatch, fake_scan_proof(), remediate=True, batch_raises=True)
+    assert job.status == "failed" and job.result is None
+    assert "Sandbox scan failed (RuntimeError; stage=none" in job.error
+    assert "y" * 161 not in job.error  # the worker's 400-char message is truncated
+    assert "account-key" not in job.error and "test-secret" not in job.error
+    # The worker raised before the launcher ran: no second VX1, no second object.
+    assert [call[0] for call in state["calls"]].count("POST") == 1
+    assert len(state["storage"]) == 1
 
 
 def test_deterministic_source_tarball_is_byte_stable_and_safely_shaped(tmp_path):
@@ -981,8 +1157,8 @@ def test_registry_shares_one_disposable_vx1_between_smoke_and_scan():
 def test_sandbox_scan_route_arms_and_consumes_one_token_like_vpc_smoke(auth, monkeypatch):
     seen = []
 
-    async def fake_scan(job, target, signals):
-        seen.append((target, signals))
+    async def fake_scan(job, target, signals, target_runtime="gvisor", remediate=False):
+        seen.append((target, signals, remediate))
         job.result = {"destroyed": True, "vpc_ip": "10.52.0.3"}
         await job.publish("completed")
 
@@ -1015,6 +1191,7 @@ def test_sandbox_scan_route_arms_and_consumes_one_token_like_vpc_smoke(auth, mon
     assert seen[0][0] == "seeded_flask"
     from main import ready_signals
     assert seen[0][1] is ready_signals
+    assert seen[0][2] is False
     assert result.status_code == 200 and result.json()["destroyed"] is True
     assert [event["status"] for event in events] == ["queued", "completed"]
     assert token not in result.text + str(events)
@@ -1023,7 +1200,7 @@ def test_sandbox_scan_route_arms_and_consumes_one_token_like_vpc_smoke(auth, mon
 def test_enabled_sandbox_scan_needs_no_arm_but_still_requires_approval_and_vpc_config(auth, monkeypatch):
     seen = []
 
-    async def fake_scan(job, target, signals):
+    async def fake_scan(job, target, signals, target_runtime="gvisor", remediate=False):
         seen.append(target)
         job.result = {"destroyed": True}
         await job.publish("completed")
@@ -1044,3 +1221,47 @@ def test_enabled_sandbox_scan_needs_no_arm_but_still_requires_approval_and_vpc_c
         assert started.status_code == 202
         assert wait_for_terminal(client, started.json()["id"], auth)["type"] == "sandbox_scan"
     assert seen == ["snipstash"]
+
+
+def test_remediate_is_rejected_for_every_job_type_except_sandbox_scan(auth, monkeypatch):
+    monkeypatch.setenv("CERBERUS_ENABLE_LOCAL_SCAN_JOBS", "true")
+    with TestClient(app) as client:
+        assert client.post("/jobs", headers=auth, json={"type": "connectivity", "remediate": True}).status_code == 400
+        assert client.post("/jobs", headers=auth, json={"type": "scan", "target": "seeded_flask", "remediate": True}).status_code == 400
+        smoke = {"type": "sandbox_smoke", "approve_vm": True, "netbird_setup_key": "A" * 36, "remediate": True}
+        assert client.post("/jobs", headers=auth, json=smoke).status_code == 400
+        # The flag is a StrictBool: truthy strings do not silently coerce.
+        assert client.post("/jobs", headers=auth, json={"type": "connectivity", "remediate": "true"}).status_code == 422
+
+
+def test_sandbox_scan_remediate_flag_passes_through_to_the_worker(auth, monkeypatch):
+    seen = []
+
+    async def fake_scan(job, target, signals, target_runtime="gvisor", remediate=False):
+        seen.append(remediate)
+        job.result = {"destroyed": True}
+        await job.publish("completed")
+
+    monkeypatch.setenv("CERBERUS_ENABLE_SANDBOX_JOBS", "true")
+    for name, value in VPC_ENV.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(jobs, "run_sandbox_scan_job", fake_scan)
+    with TestClient(app) as client:
+        base = {"type": "sandbox_scan", "approve_vm": True, "target": "seeded_flask"}
+        started = client.post("/jobs", headers=auth, json={**base, "remediate": True})
+        assert started.status_code == 202
+        assert wait_for_terminal(client, started.json()["id"], auth)["status"] == "completed"
+        defaulted = client.post("/jobs", headers=auth, json=base)
+        assert defaulted.status_code == 202
+        assert wait_for_terminal(client, defaulted.json()["id"], auth)["status"] == "completed"
+    assert seen == [True, False]
+
+
+def test_registry_rejects_remediate_for_non_sandbox_scan_kinds():
+    registry = jobs.JobRegistry()
+    with pytest.raises(ValueError, match="Remediation"):
+        registry.create("connectivity", remediate=True)
+    with pytest.raises(ValueError, match="Remediation"):
+        registry.create("sandbox_smoke", "A" * 36, object(), remediate=True)
+    with pytest.raises(ValueError, match="Remediation"):
+        registry.create("scan", target="seeded_flask", remediate=True)

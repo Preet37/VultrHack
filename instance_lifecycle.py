@@ -173,6 +173,79 @@ def target_run_user_data(source_url, entrypoint, vpc_subnet):
     )
 
 
+MICROSANDBOX_INSTALLER_SHA256 = "767df6954e09fec9bf8276cc2858fc9038024b3a22fa4740572620370eb719f4"
+
+
+def microsandbox_run_user_data(source_url, entrypoint, vpc_subnet):
+    validated_presigned_source_get(source_url)
+    if not isinstance(entrypoint, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", entrypoint) or ".." in entrypoint:
+        raise ValueError("Target entrypoint must be a single bounded source file name")
+    subnet = validated_vpc_subnet(vpc_subnet)
+    network = str(subnet.network_address)
+    broadcast = str(subnet.broadcast_address)
+    port = TARGET_CONTAINER_PORT
+    return (
+        "cerberus_report_stage microsandbox_install\n"
+        "export HOME=/root\n"
+        f"if ! (curl -fsSL --max-time 120 -o /root/msb-install.sh {shlex.quote('https://install.microsandbox.dev')} && echo {shlex.quote(MICROSANDBOX_INSTALLER_SHA256 + '  /root/msb-install.sh')} | sha256sum -c - && sh /root/msb-install.sh) >/root/cerberus-msbinstall.log 2>&1; then tail -c 240 /root/cerberus-msbinstall.log | tr -cd '[:print:] ' > /root/cerberus-detail; false; fi\n"
+        "rm /root/msb-install.sh\n"
+        "export PATH=\"/root/.local/bin:/root/.microsandbox/bin:$PATH\"\n"
+        "msb --version\n"
+        "if ! msb doctor >/root/cerberus-doctor.log 2>&1; then tail -c 240 /root/cerberus-doctor.log | tr -cd '[:print:] ' > /root/cerberus-detail; false; fi\n"
+        "cerberus_report_stage target_fetch\n"
+        f"curl -fsS --retry 2 --max-time 90 -o /root/target.tgz {shlex.quote(source_url)}\n"
+        "python3 -c 'import os; size = os.stat(\"/root/target.tgz\").st_size; assert 0 < size <= 8388608, \"Target source tarball is out of bounds\"'\n"
+        "mkdir -p /root/target\n"
+        "tar -xzf /root/target.tgz -C /root/target --no-same-owner\n"
+        "rm -f /root/target.tgz\n"
+        f"test -f /root/target/{shlex.quote(entrypoint)}\n"
+        "cat > /root/target/sitecustomize.py <<'PYEOF'\n"
+        "try:\n"
+        "    from flask import Flask\n"
+        "except ImportError:\n"
+        "    Flask = None\n"
+        "if Flask is not None:\n"
+        "    _base_run = Flask.run\n"
+        "    def _run(self, *args, **kwargs):\n"
+        "        kwargs['host'] = '0.0.0.0'\n"
+        "        return _base_run(self, *args, **kwargs)\n"
+        "    Flask.run = _run\n"
+        "PYEOF\n"
+        "cerberus_report_stage microsandbox_create\n"
+        "vpc_ip=$(python3 - <<'PY'\n"
+        "import ipaddress\nimport json\nimport subprocess\n"
+        f"subnet = ipaddress.ip_network({str(subnet)!r})\n"
+        "interfaces = json.loads(subprocess.check_output(['ip', '-j', '-4', 'addr'], text=True, timeout=5))\n"
+        "ips = [a['local'] for i in interfaces if i.get('ifname') != 'lo' for a in i.get('addr_info', []) if a.get('family') == 'inet' and ipaddress.ip_address(a['local']) in subnet]\n"
+        f"assert len(ips) == 1 and ips[0] not in ({network!r}, {broadcast!r}), 'guest VPC address'\n"
+        "print(ips[0])\n"
+        "PY\n"
+        ")\n"
+        f"msb create --name cerberus-target --replace --cpus 1 --memory 1024M --copy-dir /root/target:/app --port \"$vpc_ip\":{port}:{port} python\n"
+        f"command -v iptables >/dev/null 2>&1 && iptables -I INPUT -p tcp -s {subnet} --dport {port} -j ACCEPT || :\n"
+        "cerberus_report_stage target_start\n"
+        f"msb exec cerberus-target -- bash -c 'cd /app && pip install -q -r requirements.txt && (nohup env PORT={port} PYTHONPATH=/app python {entrypoint} >/tmp/target.log 2>&1 & echo started)'\n"
+        "cerberus_report_stage target_health\n"
+        f"for attempt in $(seq 1 90); do if curl -fsS --max-time 5 \"http://$vpc_ip:{port}/health\" >/dev/null 2>&1; then break; fi; sleep 3; done\n"
+        f"if ! curl -fsS --max-time 10 \"http://$vpc_ip:{port}/health\" >/dev/null; then\n"
+        "    log_tail=$(msb exec cerberus-target -- bash -c 'tail -n 6 /tmp/target.log' 2>&1 | head -c 220 | tr -cd '[:print:] ' || :)\n"
+        "    printf 'microsandbox=%s log=%s' \"unhealthy\" \"$log_tail\" > /root/cerberus-detail\n"
+        "    false\n"
+        "fi\n"
+        "proof=$(PROOF=\"$proof\" VPC_IP=\"$vpc_ip\" python3 - <<'PY'\n"
+        "import json\nimport os\n"
+        "proof = json.loads(os.environ['PROOF'])\n"
+        "proof['vpc_ip'] = os.environ['VPC_IP']\n"
+        "proof['target'] = 'healthy'\n"
+        f"proof['endpoint'] = 'http://' + os.environ['VPC_IP'] + ':{port}'\n"
+        "proof['runtime'] = 'microsandbox'\n"
+        "proof['opensandbox'] = {'hostname': os.environ['VPC_IP'], 'uname': 'microsandbox microVM', 'exit_code': 0}\n"
+        "print(json.dumps(proof))\n"
+        "PY\n"
+        ")\n"
+    )
+
+
 def nic_probe_user_data(vpc_subnet):
     return (
         "import ipaddress,json\n"
@@ -278,9 +351,11 @@ def docker_user_data(callback_url, ready_token, opensandbox_spike=False, netbird
     if target_run is not None:
         if not vpc_callback or opensandbox_spike or private_callback or netbird_setup_key is not None:
             raise ValueError("VPC target runs require the keyless VPC callback without the OpenSandbox spike")
-        if not isinstance(target_run, dict) or not set(target_run) <= {"source_url", "entrypoint"}:
+        if not isinstance(target_run, dict) or not set(target_run) <= {"source_url", "entrypoint", "runtime"}:
             raise ValueError("VPC target run options are invalid")
         validated_presigned_source_get(target_run.get("source_url"))
+        if target_run.get("runtime", "gvisor") not in ("gvisor", "microsandbox"):
+            raise ValueError("Unknown sandbox runtime")
     url = urlsplit(callback_url)
     if vpc_callback:
         if not (opensandbox_spike or target_run is not None) or netbird_setup_key is not None or private_callback:
@@ -307,6 +382,8 @@ def docker_user_data(callback_url, ready_token, opensandbox_spike=False, netbird
         raise ValueError("Ready callback must be a public HTTPS URL without credentials or a query string")
     if not ready_token:
         raise ValueError("Ready token is required")
+    target_runtime = (target_run or {}).get("runtime", "gvisor")
+    needs_docker = target_runtime != "microsandbox"
     script = (
         "#!/bin/sh\n"
         "set -eu\n"
@@ -333,6 +410,7 @@ def docker_user_data(callback_url, ready_token, opensandbox_spike=False, netbird
         script += f"CERBERUS_AUTH_HEADER={shlex.quote(f'Authorization: Bearer {ready_token}')}\n"
         failure_url = callback_url.replace("/internal/ready", "/internal/failed")
         progress_url = callback_url.replace("/internal/ready", "/internal/stage")
+
         script += (
             "CERBERUS_STAGE=docker_install\n"
             "cerberus_report_failure() {\n"
@@ -354,26 +432,31 @@ def docker_user_data(callback_url, ready_token, opensandbox_spike=False, netbird
             "}\n"
             "cerberus_report_stage docker_install\n"
         )
-    script += ("apt-get install -y docker.io\n" if private_callback or vpc_callback else "apt-get install -y docker.io curl ca-certificates gnupg\n")
-    script += "systemctl enable --now docker\n"
-    if private_callback or vpc_callback:
-        script += "cerberus_report_stage gvisor_install\n"
-    script += (
-        "curl -fsSL https://gvisor.dev/archive.key | gpg --batch --yes --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg\n"
-        "printf '%s\\n' \"deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main\" > /etc/apt/sources.list.d/gvisor.list\n"
-        "apt-get update\n"
-        "apt-get install -y runsc\n"
-        "runsc install\n"
-        "systemctl restart docker\n"
-    )
-    if private_callback or vpc_callback:
-        script += "cerberus_report_stage runtime_smoke\n"
-    script += (
-        "sandbox_output=$(docker run --rm --runtime=runsc --network=none --read-only --cap-drop=ALL --pids-limit=32 busybox:1.37.0 sh -c 'hostname; uname -a')\n"
-        "export SANDBOX_OUTPUT=\"$sandbox_output\"\n"
-        "docker info --format '{{json .Runtimes}}' | grep -q '\"runsc\"'\n"
-        "proof=$(python3 -c 'import json,os,platform,re; flags=open(\"/proc/cpuinfo\").read(); cpu=re.search(r\"\\b(vmx|svm)\\b\",flags).group(1); sandbox=os.environ[\"SANDBOX_OUTPUT\"].splitlines(); print(json.dumps({\"hostname\":platform.node(),\"uname\":\" \".join(os.uname()),\"cpu_virt\":cpu,\"kvm_device\":os.path.exists(\"/dev/kvm\"),\"kvm_access\":os.access(\"/dev/kvm\",os.R_OK|os.W_OK),\"runtime\":\"runsc\",\"sandbox_hostname\":sandbox[0],\"sandbox_uname\":sandbox[1],\"exit_code\":0}))')\n"
-    )
+    if needs_docker:
+        script += ("apt-get install -y docker.io\n" if private_callback or vpc_callback else "apt-get install -y docker.io curl ca-certificates gnupg\n")
+        script += "systemctl enable --now docker\n"
+        if private_callback or vpc_callback:
+            script += "cerberus_report_stage gvisor_install\n"
+        script += (
+            "curl -fsSL https://gvisor.dev/archive.key | gpg --batch --yes --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg\n"
+            "printf '%s\\n' \"deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main\" > /etc/apt/sources.list.d/gvisor.list\n"
+            "apt-get update\n"
+            "apt-get install -y runsc\n"
+            "runsc install\n"
+            "systemctl restart docker\n"
+        )
+        if private_callback or vpc_callback:
+            script += "cerberus_report_stage runtime_smoke\n"
+        script += (
+            "sandbox_output=$(docker run --rm --runtime=runsc --network=none --read-only --cap-drop=ALL --pids-limit=32 busybox:1.37.0 sh -c 'hostname; uname -a')\n"
+            "export SANDBOX_OUTPUT=\"$sandbox_output\"\n"
+            "docker info --format '{{json .Runtimes}}' | grep -q '\"runsc\"'\n"
+            "proof=$(python3 -c 'import json,os,platform,re; flags=open(\"/proc/cpuinfo\").read(); cpu=re.search(r\"\\b(vmx|svm)\\b\",flags).group(1); sandbox=os.environ[\"SANDBOX_OUTPUT\"].splitlines(); print(json.dumps({\"hostname\":platform.node(),\"uname\":\" \".join(os.uname()),\"cpu_virt\":cpu,\"kvm_device\":os.path.exists(\"/dev/kvm\"),\"kvm_access\":os.access(\"/dev/kvm\",os.R_OK|os.W_OK),\"runtime\":\"runsc\",\"sandbox_hostname\":sandbox[0],\"sandbox_uname\":sandbox[1],\"exit_code\":0}))')\n"
+        )
+    else:
+        script += (
+            "proof=$(python3 -c 'import json,platform,re; flags=open(\"/proc/cpuinfo\").read(); cpu=re.search(r\"\\b(vmx|svm)\\b\",flags).group(1); print(json.dumps({\"hostname\":platform.node(),\"uname\":\" \".join(platform.uname()),\"cpu_virt\":cpu,\"kvm_device\":__import__(\"os\").path.exists(\"/dev/kvm\"),\"kvm_access\":__import__(\"os\").access(\"/dev/kvm\",__import__(\"os\").R_OK|__import__(\"os\").W_OK),\"runtime\":\"microsandbox\"}))')\n"
+        )
     if netbird_setup_key is not None and not private_callback:
         from sandbox_platform import netbird_enrollment_user_data
 
@@ -383,7 +466,10 @@ def docker_user_data(callback_url, ready_token, opensandbox_spike=False, netbird
 
         script += opensandbox_spike_user_data(netbird=netbird_setup_key is not None, report_stages=private_callback or vpc_callback, vpc_subnet=vpc_subnet if vpc_callback else None)
     if target_run is not None:
-        script += target_run_user_data(target_run["source_url"], target_run.get("entrypoint", "app.py"), vpc_subnet)
+        if target_runtime == "microsandbox":
+            script += microsandbox_run_user_data(target_run["source_url"], target_run.get("entrypoint", "app.py"), vpc_subnet)
+        else:
+            script += target_run_user_data(target_run["source_url"], target_run.get("entrypoint", "app.py"), vpc_subnet)
     callback_stage = "cerberus_report_stage ready_callback\n" if private_callback or vpc_callback else ""
     auth_header = '"$CERBERUS_AUTH_HEADER"' if private_callback or vpc_callback else shlex.quote(f"Authorization: Bearer {ready_token}")
     script += callback_stage + (

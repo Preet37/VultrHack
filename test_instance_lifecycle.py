@@ -778,6 +778,33 @@ def test_target_ready_proof_merges_the_verified_vpc_endpoint(monkeypatch, capsys
     assert merged == {**base_proof, "vpc_ip": "10.52.0.4", "target": "healthy", "endpoint": "http://10.52.0.4:8081"}
 
 
+def test_microsandbox_target_user_data_uses_kvm_microvm_not_docker():
+    from instance_lifecycle import MICROSANDBOX_INSTALLER_SHA256
+
+    script = docker_user_data(
+        "http://10.52.0.2:8001/internal/ready", "R" * 43,
+        vpc_callback=True, vpc_subnet="10.52.0.0/24",
+        target_run={**build_target_run(), "runtime": "microsandbox"},
+    )
+    assert len(base64.b64encode(script.encode())) < 16 * 1024
+    expanded = unpack_vpc_payload(script)
+    assert subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True).returncode == 0
+    assert subprocess.run(["sh", "-n"], input=expanded, text=True, capture_output=True).returncode == 0
+    assert "apt-get install -y docker.io" not in expanded
+    assert "runsc install" not in expanded
+    assert MICROSANDBOX_INSTALLER_SHA256 in expanded and "sha256sum -c -" in expanded
+    assert "msb doctor" in expanded
+    assert "msb create --name cerberus-target --replace --cpus 1 --memory 1024M" in expanded
+    assert '--copy-dir /root/target:/app' in expanded
+    assert '--port "$vpc_ip":8081:8081' in expanded and "--port 0.0.0.0" not in expanded
+    assert "iptables -I INPUT -p tcp -s 10.52.0.0/24 --dport 8081 -j ACCEPT" in expanded
+    assert "microsandbox_install" in expanded and "microsandbox_create" in expanded
+    assert "microsandbox_install" in BOOTSTRAP_STAGES and "microsandbox_create" in BOOTSTRAP_STAGES
+    assert '"runtime": "microsandbox"' not in expanded  # per-field, not a fixed literal blob
+    assert "proof['runtime'] = 'microsandbox'" in expanded
+    assert "account-key" not in expanded and "netbird up" not in expanded
+
+
 def test_target_run_keeps_the_presigned_nic_probe_within_budget():
     script = docker_user_data(
         "http://10.52.0.2:8001/internal/ready", "R" * 43,
@@ -888,6 +915,55 @@ def test_create_disposable_target_instance_attaches_vpc_and_embeds_target_run():
     expanded = unpack_vpc_payload(script)
     assert TARGET_SOURCE_URL in expanded
     assert "--runtime=runsc" in expanded and "netbird up" not in expanded
+
+
+def test_two_sequential_disposable_target_vx1s_each_get_their_own_destroy_and_404_check():
+    """The scan -> re-exploit pattern: two back-to-back disposable target VX1s.
+
+    Each cycle creates, serves, destroys AND independently confirms the 404,
+    so a leaked first instance can never be mistaken for the second one.
+    """
+    vpc_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    created, deleted, gone_checks = [], [], []
+
+    def respond(request):
+        path = request.url.path
+        if request.method == "POST" and path == "/v2/instances":
+            instance_id = f"instance-{900 + len(created)}"
+            created.append(instance_id)
+            payload = json.loads(request.content)
+            assert payload["attach_vpc"] == [vpc_id]
+            return httpx.Response(202, json={"instance": {"id": instance_id}})
+        for instance_id in created:
+            if request.method == "DELETE" and path == f"/v2/instances/{instance_id}":
+                deleted.append(instance_id)
+                return httpx.Response(204)
+            if request.method == "GET" and path == f"/v2/instances/{instance_id}":
+                if instance_id in deleted:
+                    gone_checks.append(instance_id)
+                    return httpx.Response(404)
+                return httpx.Response(200, json={"instance": {"status": "active", "power_status": "running"}})
+        return httpx.Response(401)
+
+    async def request():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            api = VultrInstances(client, "account-key")
+            for _ in range(2):
+                async with temporary_instance(
+                    api, "ord", "vx1-g-2c-8g-120s", 2284, "http://10.52.0.2:8001/internal/ready", "R" * 43,
+                    False, None, False, vpc_callback=True, vpc_subnet="10.52.0.0/24", vpc_id=vpc_id,
+                    target_run=build_target_run(),
+                ) as instance_id:
+                    await api.wait_active(instance_id)
+                destroyed = await client.get(f"https://api.vultr.com/v2/instances/{instance_id}", headers=api.headers)
+                assert destroyed.status_code == 404
+
+    asyncio.run(request())
+    assert created == ["instance-900", "instance-901"]
+    assert deleted == created
+    # At least one independent 404 proof per cycle (destroy's own poll plus the
+    # caller's explicit check), each keyed to THAT cycle's instance id.
+    assert gone_checks.count("instance-900") >= 1 and gone_checks.count("instance-901") >= 1
 
 
 def test_target_ready_proof_binds_healthy_endpoint_to_the_private_vpc_ip():
