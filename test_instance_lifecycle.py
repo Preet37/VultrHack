@@ -79,7 +79,6 @@ def test_create_uses_cloud_init_without_vultr_keys():
     assert "test -w /dev/kvm" in script
     assert "docker.io" in script
     assert "runsc install" in script
-    assert 'config["default-runtime"]="runsc"' in script
     assert "--runtime=runsc" in script
     assert "sh -c 'hostname; uname -a'" in script
     assert "docker info --format" in script
@@ -708,7 +707,7 @@ def test_target_run_user_data_builds_gvisor_target_bound_only_to_the_vpc_ip():
     assert expanded.index("bootstrap_started") < expanded.index("apt-get update")
     assert "apt-get install -y curl ca-certificates gnupg" in expanded
     assert "apt-get install -y docker.io" in expanded
-    assert "apt-get install -y runsc" in expanded and 'config["default-runtime"]="runsc"' in expanded
+    assert "apt-get install -y runsc" in expanded and 'default-runtime' not in expanded
     # The target source arrives only through the single-object presigned GET.
     assert TARGET_SOURCE_URL in expanded
     assert "tar -xzf /root/target.tgz -C /root/target --no-same-owner" in expanded
