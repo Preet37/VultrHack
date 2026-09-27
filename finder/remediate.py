@@ -85,7 +85,12 @@ def free_port() -> int:
 
 
 def _start_target(target_dir: Path, entrypoint: str, port: int) -> subprocess.Popen:
-    env = {**os.environ, "PORT": str(port)}
+    # Drop any CERBERUS_* canary overrides from the child's environment so the
+    # patched app plants its manifest-default canaries -- the same values
+    # canaries_for() reads. Otherwise the oracle compares against stale literals
+    # and could falsely report the re-exploit "blocked".
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CERBERUS_")}
+    env["PORT"] = str(port)
     return subprocess.Popen(
         [sys.executable, entrypoint],
         cwd=str(target_dir),
@@ -144,10 +149,15 @@ def _functional_ok(finding: Finding, base: str, canaries: list[str], timeout: fl
             resp = client.get(f"{base}{finding.endpoint}", params={finding.param: benign})
     except httpx.HTTPError:
         return False
-    if resp.status_code != 200 or first_match(canaries, resp.text):
+    if first_match(canaries, resp.text):
         return False
+    if finding.vuln_class == "path_traversal":
+        # A legitimate (non-traversal) filename must not be rejected by the guard.
+        # It may still 404 if that file does not exist on this target; only a 403
+        # (the guard's own rejection) means the patch over-blocks.
+        return resp.status_code != 403
     low = resp.text.lower()
-    return "traceback" not in low and "query error" not in low
+    return resp.status_code == 200 and "traceback" not in low and "query error" not in low
 
 
 def _validate(finding: Finding, sink_symbol: str, new_source: str) -> tuple[bool, str]:
@@ -202,11 +212,16 @@ def _validate(finding: Finding, sink_symbol: str, new_source: str) -> tuple[bool
                     return True, "guard resolves the host and blocks loopback/private/link-local ranges"
         return False, "no resolve-based SSRF guard found"
     if finding.vuln_class == "auth_bypass":
+        # Require an actual comparison guard that returns 403 -- not merely any
+        # if-block whose text happens to contain "403" (e.g. a rate-limit branch).
         for node in ast.walk(fn):
-            if isinstance(node, ast.If) and any(isinstance(b, (ast.Return, ast.Raise)) for b in ast.walk(node)):
-                if "403" in (ast.get_source_segment(new_source, node) or ""):
-                    return True, "ownership guard returning 403 is present"
-        return False, "no ownership check found"
+            if not isinstance(node, ast.If):
+                continue
+            has_compare = any(isinstance(t, ast.Compare) for t in ast.walk(node.test))
+            exits = any(isinstance(b, (ast.Return, ast.Raise)) for b in ast.walk(node))
+            if has_compare and exits and "403" in (ast.get_source_segment(new_source, node) or ""):
+                return True, "ownership comparison guard returning 403 is present"
+        return False, "no ownership comparison guard found"
     return True, "no static validator for this class yet"
 
 

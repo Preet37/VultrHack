@@ -134,10 +134,13 @@ def _patch_path_traversal(src: str, fn: ast.AST) -> Patch | None:
     # Reject parent-directory ('..') COMPONENTS and absolute paths -- this blocks
     # the traversal escape while still allowing legitimate nested names like
     # "sub/readme.txt", rather than banning every separator.
+    # 403 (not 404) so a rejected traversal is distinguishable from a file that
+    # merely does not exist -- the proof loop uses that to check the guard did
+    # not also block legitimate filenames.
     guard = (
         f"{assign_seg}\n"
         f'{indent}if ".." in Path({var}).parts or Path({var}).is_absolute():\n'
-        f'{indent}    return Response("not found", status=404, mimetype="text/plain")'
+        f'{indent}    return Response("forbidden", status=403, mimetype="text/plain")'
     )
     new_src = src.replace(assign_seg, guard, 1)
     if new_src == src:

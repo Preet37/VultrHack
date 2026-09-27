@@ -76,10 +76,12 @@ def _user_prompt(routes: list[dict], candidates: list[Candidate]) -> str:
 def _endpoint_param(candidate: Candidate, routes: list[dict]) -> tuple[str, str]:
     src, _, name = candidate.input_source.partition(":")
     param = name or "id"
-    # Match a route whose symbol/path aligns with the sink function name.
+    # Match a route whose path has the sink function name as a WHOLE segment
+    # (not a substring: 'count' must not match '/account').
     for r in routes:
         path = r.get("path", "")
-        if candidate.sink_symbol and candidate.sink_symbol in path:
+        segments = [s for s in path.split("/") if s]
+        if candidate.sink_symbol and candidate.sink_symbol in segments:
             return path, param
     # Otherwise match a route that declares this param.
     for r in routes:
@@ -128,13 +130,16 @@ def triage(candidates: list[Candidate], routes: list[dict], client: InferenceCli
                     cand = by_id.get(item.get("candidate_id"))
                     if not cand:
                         continue
+                    # Statically-derived endpoint/param are authoritative; we do
+                    # NOT let a model-supplied override redirect the confirmer,
+                    # since a hallucinated value would silently miss the bug.
                     endpoint, param = _endpoint_param(cand, routes)
                     plan.append(
                         TestPlanItem(
                             candidate_id=cand.id,
                             vuln_class=cand.vuln_class,
-                            endpoint=item.get("endpoint") or endpoint,
-                            param=item.get("param") or param,
+                            endpoint=endpoint,
+                            param=param,
                             confidence=_as_confidence(item.get("confidence")),
                             reason=str(item.get("reason", ""))[:300],
                             tool=item.get("tool") or cand.vuln_class,

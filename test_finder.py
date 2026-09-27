@@ -97,6 +97,38 @@ def test_seeded_path_traversal_confirmed(target):
     assert pt[0].endpoint == "/download"
 
 
+def test_endpoint_param_requires_whole_segment_match():
+    # 'count' must NOT be routed to '/account' by substring; it should fall to the
+    # route that actually declares the param.
+    from finder.models import Candidate
+    from finder.triage import _endpoint_param
+
+    cand = Candidate(
+        id="x", vuln_class="sqli", sink_file="a.py", sink_line=1,
+        sink_symbol="count", snippet="", input_source="query:id",
+    )
+    routes = [
+        {"path": "/account", "inputs": []},
+        {"path": "/counter", "inputs": [{"name": "id", "source": "query"}]},
+    ]
+    endpoint, param = _endpoint_param(cand, routes)
+    assert endpoint == "/counter" and param == "id"
+
+
+def test_summary_is_not_self_contradictory():
+    from finder.models import Coverage, Finding, FinderReport
+
+    finding = Finding(
+        id="1", vuln_class="sqli", endpoint="/x", param="id", input_to_sink="",
+        sink_file="a.py", sink_line=1, exploit_request="GET x", confirming_output="",
+        canary_observed=True, canary_value="", fix="", confirmer="", triage_source="",
+    )
+    with_findings = FinderReport("t", [finding], Coverage(classes_tested=["sqli"]), "offline").to_dict()["summary"]
+    assert "no exploit found" not in with_findings  # not contradictory when a bug was found
+    clean = FinderReport("t", [], Coverage(), "offline").to_dict()["summary"]
+    assert "no exploit found" in clean  # the honest caveat only on a clean run
+
+
 def test_all_supported_classes_confirmed(target):
     base_url, source = target
     report = run_finder(base_url, source, wall_clock_seconds=60)

@@ -104,13 +104,11 @@ def recon(base_url: str, source_dir: str | None = None) -> tuple[list[Route], di
     manifest = load_manifest(source_dir)
     routes: dict[str, Route] = {}
     if manifest:
+        # The manifest is authoritative for seeded targets; skip the live crawl
+        # (up to 15 HTTP fetches) on the hot path when it fully defines the surface.
         for r in routes_from_manifest(manifest):
             routes[r.path] = r
-    for r in crawl(base_url):
-        if r.path not in routes:
+    else:
+        for r in crawl(base_url):
             routes[r.path] = r
-        else:
-            for i in r.inputs:
-                if i not in routes[r.path].inputs:
-                    routes[r.path].inputs.append(i)
     return list(routes.values()), manifest
