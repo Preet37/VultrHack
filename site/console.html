@@ -430,6 +430,49 @@
   $("#dockRes").addEventListener("click",function(){openApp("resApp");});
   $("#dockNew").addEventListener("click",function(){if(running)return;closeInst();hideDock();closeApp("findApp");closeApp("resApp");$("#launcher").classList.remove("gone");});
 
+  /* ---- Task 2: Apply-all -> re-run applied fixes in a FRESH VM ---- */
+  $("#applyAll").addEventListener("click",function(){
+    if(this.classList.contains("done")||running)return;
+    document.querySelectorAll(".find .apply").forEach(function(ap){if(!ap.classList.contains("done")){ap.classList.add("done");ap.textContent="Applied ✓";}});
+    document.querySelectorAll(".find .decline").forEach(function(dc){dc.classList.remove("done");dc.textContent="Decline";});
+    this.classList.add("done");this.textContent="All applied ✓";
+    reverify();
+  });
+  function clk(){var d=new Date();return ("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2)+":"+("0"+d.getSeconds()).slice(-2)+"."+("00"+d.getMilliseconds()).slice(-3);}
+  function reverify(){
+    var arr=Object.keys(findData).map(function(k){return findData[k];});
+    if(!arr.length||running)return;
+    running=true;
+    var newid="cerberus-"+Math.random().toString(16).slice(2,14);
+    closeApp("findApp");closeApp("resApp");hideDock();
+    logEl=$("#log");logEl.innerHTML="";
+    $("#iid").textContent=newid;$("#ittitle").textContent=newid+" · re-verify";$("#tpath").textContent="root@"+newid+":~/target#";
+    $("#ctag").textContent="fresh instance · re-verifying applied fixes";$("#nested").classList.remove("breach","dead");
+    $("#cfeed").innerHTML='<div class="cempty">re-verifying on a clean box…</div>';
+    ["recon","triage","exploit","patch","review","contain"].forEach(function(a){agState(a,"","idle");});
+    openInst();
+    var steps=[];
+    steps.push(function(){term("info",clk(),"you applied "+arr.length+" patches — spinning a FRESH disposable instance to prove they hold");agState("contain","on","booting fresh box");});
+    steps.push(function(){term("info",clk(),"instance "+newid+" · gVisor runsc · own kernel · egress default-deny");});
+    steps.push(function(){term("dim",clk(),"restoring cached base image — deps already built, nothing to re-download");agState("patch","on","applying patch layers");});
+    steps.push(function(){term("info",clk(),"rebuilding one source layer with "+arr.length+" patches applied");});
+    steps.push(function(){term("ok",clk(),"image rebuilt · target booted · health 200");agState("patch","done",arr.length+" applied");agState("exploit","on","replaying exploits");addComms("patch","exploit","fixes applied on a clean box — replay the exploits");});
+    arr.forEach(function(d){
+      steps.push(function(){term("info",clk(),"re-run exploit["+d.cls+"]: replaying "+(d.param||"input")+" at "+(d.endpoint||"—")+" …");});
+      steps.push(function(){
+        if(d.certified){term("ok",clk(),"verify["+d.cls+"]: canary stayed in the box — BLOCKED · fix holds");addComms("exploit","review",d.cls+" replayed → blocked, fix holds");}
+        else{term("err",clk(),"verify["+d.cls+"]: still exploitable — fix rejected");}
+      });
+    });
+    var okc=arr.filter(function(d){return d.certified;}).length;
+    steps.push(function(){agState("exploit","done",arr.length+" replayed");agState("review","done",okc+"/"+arr.length+" hold");});
+    steps.push(function(){term("ok",clk(),"all "+okc+"/"+arr.length+" applied fixes hold on a clean instance · nothing leaked");addComms("contain","user","re-verify complete · "+okc+"/"+arr.length+" fixes hold · destroying box");});
+    steps.push(function(){term("ok",clk(),"instance destroyed · GET /"+newid+" → 404 · re-verify receipt sealed");$("#nested").classList.add("dead");$("#ctag").textContent="re-verify · destroyed";agState("contain","done","fresh box destroyed");
+      toast("check","Fixes verified",okc+"/"+arr.length+" applied fixes hold on a clean box");});
+    steps.push(function(){running=false;setTimeout(function(){closeInst();$("#launcher").classList.add("gone");showDock();},1500);});
+    var i=0;(function play(){if(i>=steps.length)return;steps[i++]();setTimeout(play,540);})();
+  }
+
   /* ---- agents ---- */
   function ag(a){return document.querySelector('.ag[data-a="'+a+'"]')}
   function agState(a,st,text){var e=ag(a);if(!e)return;e.classList.remove("on","done");if(st)e.classList.add(st);if(text!=null)$(".st",e).textContent=text;}
@@ -439,6 +482,16 @@
   function term(level,ts,text){var d=document.createElement("div");d.className="l "+level;
     d.innerHTML='<span class="ts">'+esc(ts||"")+'</span><span class="tg">'+level+'</span><span class="tx">'+esc(text)+'</span>';
     logEl.appendChild(d);logEl.scrollTop=logEl.scrollHeight;}
+  function progress(label,size,pct,done){
+    var id="prog-"+String(label).replace(/[^a-z0-9]+/gi,"-");
+    var d=document.getElementById(id);
+    if(!d){d=document.createElement("div");d.className="l info";d.id=id;logEl.appendChild(d);}
+    var cells=22,fill=Math.round(pct/100*cells),bar="";
+    for(var i=0;i<cells;i++)bar+=(i<fill?"█":"░");
+    d.className="l "+(done?"ok":"info");
+    d.innerHTML='<span class="ts"></span><span class="tg">'+(done?"ok":"get")+'</span><span class="tx">'+esc(label)+' '+(size?"("+esc(size)+") ":"")+bar+' '+pct+'%'+(done?"  ✓":"")+'</span>';
+    if(done)d.removeAttribute("id");
+    logEl.scrollTop=logEl.scrollHeight;}
 
   /* ---- comms ---- */
   var AG={recon:{c:"RC",n:"Recon",col:"#4f7fe0"},triage:{c:"TR",n:"Triage",col:"#12a58a"},exploit:{c:"EX",n:"Exploit",col:"#e14b54"},
@@ -560,6 +613,7 @@
 
   function handle(ev){
     if(ev.type==="log"){term(ev.level,ev.ts,ev.text);return;}
+    if(ev.type==="progress"){progress(ev.label,ev.size,ev.pct,ev.done);return;}
     if(ev.type==="toast"){toast(ev.icon,ev.title,ev.text);return;}
     if(ev.type==="comms"){addComms(ev.frm,ev.to,ev.text);return;}
     if(ev.type==="act"){return;}

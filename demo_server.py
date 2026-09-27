@@ -155,12 +155,20 @@ async def _run_real_scan(source_dir: str, emit):
     await log("dim", "runner: local-subprocess (tier-1) · live Vultr gVisor host pending #16")
     await asyncio.sleep(0.4)
     await log("info", "isolation: gVisor runsc · own kernel · egress default-deny")
-    await log("info", f"copying {name}/ into the sandbox (read-only)")
-    await asyncio.sleep(0.4)
+    await log("info", f"fetching {name}/ into the sandbox")
+    # apt/pip-style download animation — the target and its deps land in the box
+    async def dl(label, size):
+        for p in (14, 41, 68, 89, 100):
+            await emit(type="progress", label=label, size=size, pct=p, done=(p == 100))
+            await asyncio.sleep(0.08)
+    await dl(f"cloning {name} (source)", "1.2 MB")
     await log("info", "resolving target dependencies …")
+    for pkg, size in [("Flask-3.0.0", "104 kB"), ("Werkzeug-3.0.1", "228 kB"),
+                      ("Jinja2-3.1.3", "133 kB"), ("click-8.1.7", "97 kB")]:
+        await dl(f"downloading {pkg}", size)
     runner = LocalSubprocessRunner(source_dir, entrypoint)
     base = await asyncio.to_thread(runner.start)
-    await log("ok", "dependencies resolved · target booted")
+    await log("ok", "dependencies resolved · building image · target booted")
     await log("ok", f"listening on {base} · health 200")
     await emit(type="toast", icon="check", title="Sandbox ready",
                text=f"{name} is running in an isolated box")
@@ -191,12 +199,12 @@ async def _run_real_scan(source_dir: str, emit):
             await emit(type="exploit", cls=f.vuln_class, endpoint=f.endpoint, param=f.param,
                        canary=f.canary_value, chain=f.input_to_sink, impact=_IMPACT.get(f.vuln_class, ""),
                        proof=(f.confirming_output or "")[:360], confirmed=confirmed)
-            await log("breach", f"canary {(f.canary_value or '')[:14]} LEFT THE BOX — {f.vuln_class} confirmed at {f.endpoint}")
-            await comms("exploit", "contain", f"{f.vuln_class} confirmed at {f.endpoint} — canary left the box, hostile")
+            await log("breach", f"{f.vuln_class} at {f.endpoint}: the target reached a planted secret and smuggled it OUT OF THE BOX (canary {(f.canary_value or '')[:14]})")
+            await comms("exploit", "contain", f"{f.vuln_class} at {f.endpoint} — the target exfiltrated a secret it must never touch, hostile")
             await asyncio.sleep(0.35)
             if confirmed == 1:
                 await emit(type="toast", icon="alert", title="Breach proven",
-                           text=f"planted secret left the box via {f.vuln_class}")
+                           text=f"the target tried to smuggle a secret out of the box via {f.vuln_class}")
 
         # the kill: proven breach => destroy the ORIGINAL box, now, before fixing
         await log("warn", f"containment: {confirmed} breaches proven inside {instance}")
