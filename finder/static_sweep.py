@@ -112,9 +112,12 @@ class _Visitor(ast.NodeVisitor):
         if not any(m in fn_src for m in ("request.headers", "session", "current_user", "g.user")):
             return
         for sub in ast.walk(fn):
+            # Only query-string reads (args/values), which the confirmer can fire
+            # at as ?id=. Path-parameter IDOR (view_args) is not confirmable yet,
+            # so we do not flag what we cannot prove.
             if (
                 isinstance(sub, ast.Call)
-                and _dotted(sub.func).endswith(("args.get", "values.get", "view_args.get"))
+                and _dotted(sub.func).endswith(("args.get", "values.get"))
                 and sub.args
                 and isinstance(sub.args[0], ast.Constant)
             ):

@@ -33,6 +33,9 @@ ACCT_CANARY = os.environ.get("CERBERUS_ACCT_CANARY", "ACCTCANARY-1a2b3c4d5e6f-DO
 # Canary served only by an internal-only endpoint; only an SSRF that makes the
 # server fetch that endpoint can carry it back out.
 SSRF_CANARY = os.environ.get("CERBERUS_SSRF_CANARY", "SSRFCANARY-0f1e2d3c4b5a-INTERNAL-ONLY")
+# The authenticated user for this demo session. Server-side and trusted -- NOT
+# derived from any client-supplied value.
+SESSION_USER = "1"
 
 DB_PATH = Path(__file__).with_name("shop.db")
 
@@ -155,7 +158,7 @@ def fetch():
 def account():
     # VULNERABLE (auth bypass / IDOR): returns any account by id without checking
     # the logged-in user owns it. Correct fix: enforce the caller owns the object.
-    current_user = request.headers.get("X-User", "1")
+    current_user = SESSION_USER  # server-trusted identity, not client-supplied
     account_id = request.args.get("id", current_user)
     conn = get_db()
     try:

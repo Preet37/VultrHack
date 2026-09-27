@@ -52,6 +52,21 @@ def _indent_of(src: str, node: ast.AST) -> str:
     return " " * (len(line) - len(line.lstrip()))
 
 
+def _ensure_imports(src: str, needed: list[str]) -> str:
+    """Insert any missing top-level import lines after the existing import block."""
+    lines = src.splitlines()
+    have = {line.strip() for line in lines}
+    missing = [imp for imp in needed if imp not in have]
+    if not missing:
+        return src
+    idx = 0
+    for i, line in enumerate(lines):
+        if line.startswith(("import ", "from ")):
+            idx = i + 1
+    lines[idx:idx] = missing
+    return "\n".join(lines) + ("\n" if src.endswith("\n") else "")
+
+
 def _patch_sqli(src: str, fn: ast.AST) -> Patch | None:
     """Turn `q = "... = " + v; execute(q)` into a parameterized query."""
     concat = None
@@ -174,7 +189,7 @@ def _patch_command_injection(src: str, fn: ast.AST) -> Patch | None:
 
 
 def _patch_ssrf(src: str, fn: ast.AST) -> Patch | None:
-    """Reject non-http(s) schemes and internal hosts before the URL is fetched."""
+    """Resolve the URL host and block non-http(s), loopback, link-local, and private targets."""
     found = _assign_by_value(src, fn, "request.", ".get(")
     if found is None:
         return None
@@ -183,43 +198,59 @@ def _patch_ssrf(src: str, fn: ast.AST) -> Patch | None:
     if not assign_seg:
         return None
     indent = _indent_of(src, assign_node)
+    # Resolve the host to an IP and reject internal ranges. This defeats
+    # uppercase hosts, DNS names that resolve inward, and decimal/hex-encoded
+    # IPs -- string denylists of "127.0.0.1"/"localhost" do not.
     guard = (
         f"{assign_seg}\n"
-        f'{indent}if not {var}.lower().startswith(("http://", "https://")) or any(\n'
-        f'{indent}    h in {var} for h in ("127.0.0.1", "localhost", "0.0.0.0", "::1", "169.254.")\n'
-        f"{indent}):\n"
+        f"{indent}_parsed = urlparse({var})\n"
+        f"{indent}try:\n"
+        f'{indent}    _ip = ipaddress.ip_address(socket.gethostbyname(_parsed.hostname or ""))\n'
+        f"{indent}except (OSError, ValueError):\n"
+        f'{indent}    return Response("fetch failed", status=502, mimetype="text/plain")\n'
+        f'{indent}if _parsed.scheme not in ("http", "https") or _ip.is_private or _ip.is_loopback or _ip.is_link_local or _ip.is_reserved:\n'
         f'{indent}    return Response("fetch failed", status=502, mimetype="text/plain")'
     )
     new_src = src.replace(assign_seg, guard, 1)
     if new_src == src:
         return None
-    return Patch("ssrf", "Allowlist the http(s) scheme and block loopback/link-local hosts before fetching.", new_src)
+    new_src = _ensure_imports(new_src, ["import ipaddress", "import socket", "from urllib.parse import urlparse"])
+    return Patch("ssrf", "Resolve the URL host and block non-http(s), loopback, link-local, and private targets.", new_src)
 
 
 def _patch_auth_bypass(src: str, fn: ast.AST) -> Patch | None:
-    """Insert an ownership check: the requested id must match the caller identity."""
-    user = _assign_by_value(src, fn, "headers", ".get(")
-    obj = _assign_by_value(src, fn, "args", ".get(")
-    if user is None or obj is None:
-        return None
-    user_node, user_var = user
-    obj_node, obj_var = obj
-    if user_var == obj_var:
-        return None
-    anchor = obj_node if obj_node.lineno >= user_node.lineno else user_node
-    anchor_seg = ast.get_source_segment(src, anchor)
-    if not anchor_seg:
-        return None
-    indent = _indent_of(src, anchor)
-    guard = (
-        f"{anchor_seg}\n"
-        f"{indent}if str({obj_var}) != str({user_var}):\n"
-        f'{indent}    return Response("forbidden", status=403, mimetype="text/plain")'
-    )
-    new_src = src.replace(anchor_seg, guard, 1)
-    if new_src == src:
-        return None
-    return Patch("auth_bypass", "Enforce that the caller owns the requested object before returning it.", new_src)
+    """Ownership check: the requested id must match the server-side caller identity.
+
+    The identity is taken from the default of the object-id read (e.g.
+    ``request.args.get("id", current_user)``), which is a server-trusted value --
+    never a client-supplied header, which an attacker could simply spoof.
+    """
+    for node in ast.walk(fn):
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)):
+            continue
+        val = node.value
+        if not (isinstance(val, ast.Call) and _dotted(val.func).endswith(("args.get", "values.get"))):
+            continue
+        if not (len(val.args) >= 2 and isinstance(val.args[0], ast.Constant) and isinstance(val.args[1], ast.Name)):
+            continue
+        obj_var = node.targets[0].id
+        identity_var = val.args[1].id
+        if obj_var == identity_var:
+            continue
+        assign_seg = ast.get_source_segment(src, node)
+        if not assign_seg:
+            return None
+        indent = _indent_of(src, node)
+        guard = (
+            f"{assign_seg}\n"
+            f"{indent}if str({obj_var}) != str({identity_var}):\n"
+            f'{indent}    return Response("forbidden", status=403, mimetype="text/plain")'
+        )
+        new_src = src.replace(assign_seg, guard, 1)
+        if new_src == src:
+            return None
+        return Patch("auth_bypass", "Enforce that the requested object matches the server-side caller identity.", new_src)
+    return None
 
 
 _PATCHERS = {

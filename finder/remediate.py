@@ -192,13 +192,15 @@ def _validate(finding: Finding, sink_symbol: str, new_source: str) -> tuple[bool
                 return False, "a shell=True subprocess call still remains"
         return True, "no shell=True subprocess call remains; command uses an argument list"
     if finding.vuln_class == "ssrf":
+        # Require a resolve-based guard (blocks uppercase/encoded/private hosts),
+        # not just a loopback-literal string check.
         for node in ast.walk(fn):
             if isinstance(node, ast.If):
                 test_seg = ast.get_source_segment(new_source, node.test) or ""
                 exits = any(isinstance(b, (ast.Return, ast.Raise)) for b in ast.walk(node))
-                if exits and ("startswith" in test_seg or "127.0.0.1" in test_seg):
-                    return True, "guard allowlisting scheme / blocking internal hosts is present"
-        return False, "no SSRF guard found"
+                if exits and "is_private" in test_seg and "is_loopback" in test_seg:
+                    return True, "guard resolves the host and blocks loopback/private/link-local ranges"
+        return False, "no resolve-based SSRF guard found"
     if finding.vuln_class == "auth_bypass":
         for node in ast.walk(fn):
             if isinstance(node, ast.If) and any(isinstance(b, (ast.Return, ast.Raise)) for b in ast.walk(node)):

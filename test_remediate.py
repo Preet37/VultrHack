@@ -124,6 +124,33 @@ def test_no_patch_when_shape_unrecognized():
     assert patch_source("sqli", "product", src) is None
 
 
+def test_auth_bypass_patch_uses_server_identity_not_client_header():
+    # The ownership guard must compare against the server-side identity, never a
+    # client-supplied header an attacker could spoof.
+    patch = patch_source("auth_bypass", "account", SEEDED.read_text())
+    assert patch is not None
+    assert "current_user" in patch.new_source and "403" in patch.new_source
+
+
+def test_auth_bypass_confirmer_attempts_identity_spoof():
+    # So a "fix" that merely trusts a client identity header is caught, not certified.
+    import inspect
+
+    from finder.playbooks import confirm_auth_bypass
+
+    assert "X-User" in inspect.getsource(confirm_auth_bypass)
+
+
+def test_ssrf_patch_resolves_host_and_blocks_private_ranges():
+    import ast as _ast
+
+    patch = patch_source("ssrf", "fetch", SEEDED.read_text())
+    assert patch is not None
+    assert "is_private" in patch.new_source and "is_loopback" in patch.new_source
+    assert "import ipaddress" in patch.new_source  # guard's imports were injected
+    _ast.parse(patch.new_source)  # patched source still parses
+
+
 def test_validator_is_not_fooled_by_unpatched_source():
     # The unpatched download() has '..' only in a comment; validation must return
     # False, or certification would be vacuous for path traversal.

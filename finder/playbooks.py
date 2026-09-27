@@ -149,7 +149,13 @@ def _fire_get(base_url: str, endpoint: str, param: str, payloads: list[str], tim
 # --- Command injection -------------------------------------------------------
 
 def confirm_command_injection(base_url: str, endpoint: str, input_source: str, timeout: float) -> ConfirmResult:
-    """Append a command that reads the planted secret file; the oracle checks for the canary."""
+    """Append a command that reads the planted secret file; the oracle checks for the canary.
+
+    NOTE: the payloads read ``app_secret.txt`` -- the file canary planted on the
+    seeded target. A general run must instead reference the per-run canary path
+    Cerberus planted; wiring that through is part of generalizing beyond the
+    seeded targets.
+    """
     _, param = _split_source(input_source)
     payloads = [
         "127.0.0.1; cat app_secret.txt",
@@ -179,10 +185,41 @@ def confirm_ssrf(base_url: str, endpoint: str, input_source: str, timeout: float
 # --- Auth bypass / IDOR ------------------------------------------------------
 
 def confirm_auth_bypass(base_url: str, endpoint: str, input_source: str, timeout: float) -> ConfirmResult:
-    """Request objects the caller does not own; the canary belongs to another user."""
+    """Request objects the caller does not own; the canary belongs to another user.
+
+    Also spoofs a client identity header matching the requested id -- so a "fix"
+    that merely trusts a client-supplied identity is caught here and NOT certified.
+    """
     _, param = _split_source(input_source)
-    payloads = ["2", "3", "0", "9999", "1 OR 1=1"]
-    return _fire_get(base_url, endpoint, param, payloads, timeout)
+    url = f"{base_url.rstrip('/')}{endpoint}"
+    probes = [
+        ({param: "2"}, None),
+        ({param: "2"}, {"X-User": "2"}),  # spoof the identity a naive patch might trust
+        ({param: "3"}, {"X-User": "3"}),
+        ({param: "0"}, None),
+        ({param: "9999"}, None),
+    ]
+    fired_req = ""
+    combined = ""
+    attempts: list[tuple[str, str]] = []
+    try:
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+            for params, headers in probes:
+                req = client.build_request("GET", url, params=params, headers=headers or {})
+                resp = client.send(req)
+                fired_req = str(req.url)
+                label = f"GET {fired_req}" + (f" (X-User: {headers['X-User']})" if headers else "")
+                attempts.append((label, resp.text))
+                combined += f"\n[{params} hdr={headers}] -> {resp.status_code}\n{resp.text[:200]}"
+    except httpx.HTTPError as exc:
+        combined += f"\n[transport error] {exc}"
+    return ConfirmResult(
+        fired=bool(fired_req),
+        exploit_request=f"GET {fired_req}",
+        observable=combined[:400],
+        response_text=combined,
+        attempts=attempts,
+    )
 
 
 # --- Registry ----------------------------------------------------------------
