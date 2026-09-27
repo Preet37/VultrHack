@@ -917,6 +917,55 @@ def test_create_disposable_target_instance_attaches_vpc_and_embeds_target_run():
     assert "--runtime=runsc" in expanded and "netbird up" not in expanded
 
 
+def test_two_sequential_disposable_target_vx1s_each_get_their_own_destroy_and_404_check():
+    """The scan -> re-exploit pattern: two back-to-back disposable target VX1s.
+
+    Each cycle creates, serves, destroys AND independently confirms the 404,
+    so a leaked first instance can never be mistaken for the second one.
+    """
+    vpc_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    created, deleted, gone_checks = [], [], []
+
+    def respond(request):
+        path = request.url.path
+        if request.method == "POST" and path == "/v2/instances":
+            instance_id = f"instance-{900 + len(created)}"
+            created.append(instance_id)
+            payload = json.loads(request.content)
+            assert payload["attach_vpc"] == [vpc_id]
+            return httpx.Response(202, json={"instance": {"id": instance_id}})
+        for instance_id in created:
+            if request.method == "DELETE" and path == f"/v2/instances/{instance_id}":
+                deleted.append(instance_id)
+                return httpx.Response(204)
+            if request.method == "GET" and path == f"/v2/instances/{instance_id}":
+                if instance_id in deleted:
+                    gone_checks.append(instance_id)
+                    return httpx.Response(404)
+                return httpx.Response(200, json={"instance": {"status": "active", "power_status": "running"}})
+        return httpx.Response(401)
+
+    async def request():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            api = VultrInstances(client, "account-key")
+            for _ in range(2):
+                async with temporary_instance(
+                    api, "ord", "vx1-g-2c-8g-120s", 2284, "http://10.52.0.2:8001/internal/ready", "R" * 43,
+                    False, None, False, vpc_callback=True, vpc_subnet="10.52.0.0/24", vpc_id=vpc_id,
+                    target_run=build_target_run(),
+                ) as instance_id:
+                    await api.wait_active(instance_id)
+                destroyed = await client.get(f"https://api.vultr.com/v2/instances/{instance_id}", headers=api.headers)
+                assert destroyed.status_code == 404
+
+    asyncio.run(request())
+    assert created == ["instance-900", "instance-901"]
+    assert deleted == created
+    # At least one independent 404 proof per cycle (destroy's own poll plus the
+    # caller's explicit check), each keyed to THAT cycle's instance id.
+    assert gone_checks.count("instance-900") >= 1 and gone_checks.count("instance-901") >= 1
+
+
 def test_target_ready_proof_binds_healthy_endpoint_to_the_private_vpc_ip():
     proof = {
         "hostname": "vx1-test", "uname": "Linux vx1-test x86_64", "cpu_virt": "svm",

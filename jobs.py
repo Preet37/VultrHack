@@ -107,9 +107,13 @@ class JobRegistry:
         self.arm_hold_seconds = 0
         return hold
 
-    def create(self, kind="connectivity", setup_key=None, signals=None, vpc_mode=False, target=None, diagnostic_hold_seconds=None, diagnostic_upload=None, target_runtime="gvisor"):
+    def create(self, kind="connectivity", setup_key=None, signals=None, vpc_mode=False, target=None, diagnostic_hold_seconds=None, diagnostic_upload=None, target_runtime="gvisor", remediate=False):
         if kind not in ("connectivity", "sandbox_smoke", "scan", "sandbox_scan"):
             raise ValueError("Unsupported job type")
+        if remediate and kind != "sandbox_scan":
+            # The re-exploit pass patches against findings from a sandboxed scan
+            # and must never run against a locally booted target or a smoke VM.
+            raise ValueError("Remediation is only available for sandbox scans")
         if kind == "sandbox_smoke":
             if signals is None or (not setup_key and not vpc_mode) or (setup_key and vpc_mode):
                 raise ValueError("Sandbox job requires one private network mode and readiness signals")
@@ -141,7 +145,7 @@ class JobRegistry:
         elif kind == "scan":
             worker = run_scan_job(job, target)
         elif kind == "sandbox_scan":
-            worker = run_sandbox_scan_job(job, target, signals, target_runtime=target_runtime)
+            worker = run_sandbox_scan_job(job, target, signals, target_runtime=target_runtime, remediate=remediate)
         elif vpc_mode:
             options = {"diagnostic_hold_seconds": diagnostic_hold_seconds} if diagnostic_hold_seconds is not None else {}
             if diagnostic_upload is not None:
@@ -449,7 +453,7 @@ async def run_sandbox_smoke_job(job, setup_key, signals, vpc_mode=False, diagnos
             signals.unregister(token)
 
 
-async def run_sandbox_scan_job(job, target_name, signals, target_runtime="gvisor"):
+async def run_sandbox_scan_job(job, target_name, signals, target_runtime="gvisor", remediate=False):
     """Scan one seeded target running inside gVisor on a disposable VPC VX1.
 
     Same lifecycle discipline as the VPC smoke (preflight the approved VPC and
@@ -459,6 +463,16 @@ async def run_sandbox_scan_job(job, target_name, signals, target_runtime="gvisor
     builds a minimal image, and serves it detached with ``--runtime=runsc``
     published only on the guest's provider-verified VPC IPv4. The finder then
     scans that private endpoint. The staged source object is always deleted.
+
+    With ``remediate=True`` and at least one confirmed finding, a second pass
+    follows the scan (only after the first VX1 is destroyed and confirmed 404):
+    ``finder.remediate.remediate_batch`` patches all findings into one shared
+    disposable copy and hosts it EXACTLY ONCE -- on a SECOND disposable VX1
+    provisioned synchronously by a launcher running in a worker thread (its own
+    event loop, its own boto3 client, a FRESH ReadySignals instance, and its
+    own destroy + independent 404 + object-delete teardown). The re-exploit
+    therefore runs in the same sandbox runtime as the proof scan, never on
+    this host, and both instances and both staged objects are always cleaned.
     """
     import boto3
     from botocore.config import Config
@@ -549,6 +563,137 @@ async def run_sandbox_scan_job(job, target_name, signals, target_runtime="gvisor
                 raise RuntimeError("Disposable target VX1 was not independently confirmed destroyed")
             await asyncio.to_thread(storage.delete_object, Bucket=bucket, Key=object_key)
             object_deleted = True
+        remediation = None
+        if remediate and report.findings:
+            # The patch + re-exploit pass runs in a worker thread and hosts the
+            # shared patched copy on a SECOND disposable VX1, provisioned
+            # synchronously by this launcher. Nothing untrusted ever boots on
+            # the control host, and the launcher never shares the scan phase's
+            # boto3 client, httpx client, or event loop.
+            from concurrent.futures import Future as TaskFuture
+
+            launcher_token = signals.register()
+            proof_bridge = TaskFuture()
+
+            async def relay_proof():
+                try:
+                    proof_bridge.set_result(await signals.wait(launcher_token, timeout=600))
+                except BaseException as wait_error:
+                    proof_bridge.set_exception(wait_error)
+                finally:
+                    signals.unregister(launcher_token)
+
+            bridge_task = asyncio.create_task(relay_proof())
+
+            def sync_launcher(dst_path, fresh_entrypoint):
+                launcher_storage = boto3.client(
+                    "s3", region_name=region_name, endpoint_url=endpoint,
+                    aws_access_key_id=access_key, aws_secret_access_key=secret_key,
+                    config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}),
+                )
+                launcher_key = "src/" + secrets.token_hex(16) + ".tgz"
+                launcher_storage.put_object(Bucket=bucket, Key=launcher_key, Body=deterministic_source_tarball(dst_path))
+                launcher_url = presign_source_get(launcher_storage, endpoint, bucket, launcher_key, expires_in=900)
+                second = {"instance_id": None}
+
+                async def destroy_second_vx1():
+                    second_id = second["instance_id"]
+                    if second_id is None:
+                        return
+                    async with httpx.AsyncClient(timeout=60, trust_env=False) as launcher_client:
+                        launcher_api = VultrInstances(launcher_client, api_key)
+                        await launcher_api.destroy(second_id)
+                        gone = await launcher_client.get(f"{API_URL}/{second_id}", headers=launcher_api.headers)
+                        if gone.status_code != 404:
+                            raise RuntimeError("Disposable re-exploit VX1 was not independently confirmed destroyed")
+
+                async def _provision_and_wait():
+                    async with httpx.AsyncClient(timeout=60, trust_env=False) as launcher_client:
+                        launcher_api = VultrInstances(launcher_client, api_key)
+                        second_id = await launcher_api.create(
+                            region, os.getenv("VULTR_PLAN", DEFAULT_VX1_PLAN), 2284, callback, launcher_token,
+                            False, None, False, vpc_callback=True, vpc_subnet=str(subnet), vpc_id=vpc_id,
+                            target_run={"source_url": launcher_url, "entrypoint": fresh_entrypoint, "runtime": target_runtime},
+                        )
+                        second["instance_id"] = second_id
+                        try:
+                            await launcher_api.wait_active(second_id)
+                            launcher_ip = await launcher_api.wait_vpc_attachment(second_id, vpc_id, str(subnet))
+                            if launcher_ip == str(control_ip):
+                                raise ValueError("Disposable and control VX1 cannot share a VPC address")
+                            launcher_proof = await asyncio.to_thread(proof_bridge.result, 660)
+                            if "failure_stage" in launcher_proof:
+                                raise RuntimeError("Sandbox bootstrap reported a bounded failure stage")
+                            launcher_base = f"http://{launcher_ip}:8081"
+                            expected = "microsandbox" if target_runtime == "microsandbox" else "runsc"
+                            if launcher_proof.get("runtime") != expected or launcher_proof.get("vpc_ip") != launcher_ip or launcher_proof.get("target") != "healthy" or launcher_proof.get("endpoint") != launcher_base:
+                                raise ValueError("Target readiness proof does not match the provider VPC attachment")
+                            return launcher_base
+                        except Exception:
+                            await destroy_second_vx1()
+                            second["instance_id"] = None
+                            raise
+                try:
+                    launcher_base = asyncio.run(_provision_and_wait())
+                except Exception:
+                    try:
+                        launcher_storage.delete_object(Bucket=bucket, Key=launcher_key)
+                    except Exception:
+                        pass
+                    raise
+
+                def stop():
+                    # Both teardowns are attempted even if the first fails: the
+                    # second VX1's destroy (with its own 404 confirmation) and
+                    # the second staged object's delete are independently best
+                    # effort, surfacing the first failure.
+                    first_error = None
+                    try:
+                        asyncio.run(destroy_second_vx1())
+                    except Exception as stop_error:
+                        first_error = stop_error
+                    try:
+                        launcher_storage.delete_object(Bucket=bucket, Key=launcher_key)
+                    except Exception as stop_error:
+                        if first_error is None:
+                            first_error = stop_error
+                    second["instance_id"] = None
+                    if first_error is not None:
+                        raise first_error
+
+                return launcher_base, stop
+
+            def _remediate_in_sandbox():
+                from finder.remediate import remediate_batch
+
+                results, functional = remediate_batch(report.findings, str(source_dir), launcher=sync_launcher)
+                return {
+                    "attempted": len(results),
+                    "certified": sum(1 for result in results if result.certified),
+                    "re-exploit_sandboxed": True,
+                    "results": [
+                        {
+                            "finding_id": result.finding_id,
+                            "vuln_class": result.vuln_class,
+                            "patched": result.patched,
+                            "patch_source": result.patch_source,
+                            "reexploit_blocked": result.reexploit_blocked,
+                            "functional_ok": result.functional_ok,
+                            "validated": result.validated,
+                            "validation_notes": result.validation_notes[:200],
+                        }
+                        for result in results[:32]
+                    ],
+                    "shared_functional": bool(functional),
+                }
+
+            await job.publish("running", "remediating")
+            try:
+                remediation = await asyncio.to_thread(_remediate_in_sandbox)
+            finally:
+                if not bridge_task.done():
+                    bridge_task.cancel()
+                    await asyncio.gather(bridge_task, return_exceptions=True)
         coverage = report.coverage.to_dict()
         job.result = {
             "instance_id": instance_id,
@@ -573,6 +718,8 @@ async def run_sandbox_scan_job(job, target_name, signals, target_runtime="gvisor
             "destroyed": True,
             "source_object_deleted": True,
         }
+        if remediation is not None:
+            job.result["remediation"] = remediation
     except Exception as error:
         last_stage = signals.stage(token) if token is not None else None
         detail = f"{type(error).__name__}; stage={failure_stage or last_stage or 'none'}"

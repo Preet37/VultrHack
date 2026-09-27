@@ -35,6 +35,7 @@ class JobRequest(BaseModel):
     arm_token: SecretStr | None = None
     diagnostic_upload: dict | None = None
     target: str | None = None
+    remediate: StrictBool = False
 
 
 class SandboxArmRequest(BaseModel):
@@ -252,6 +253,10 @@ async def arm_sandbox_job(request: SandboxArmRequest, authorization: str | None 
 @app.post("/jobs", status_code=202)
 async def start_job(request: JobRequest, authorization: str | None = Header(default=None)):
     require_control(authorization)
+    if request.remediate and request.type != "sandbox_scan":
+        # Remediation re-exploits against a SECOND disposable VX1 and needs the
+        # findings of a sandboxed scan; no other job type can carry it.
+        raise HTTPException(status_code=400, detail="Remediation is only available for sandbox_scan jobs")
     if request.type == "sandbox_smoke":
         if request.target is not None:
             raise HTTPException(status_code=400, detail="Sandbox jobs do not accept a target")
@@ -301,11 +306,11 @@ async def start_job(request: JobRequest, authorization: str | None = Header(defa
         if not all(os.getenv(name) for name in ("CERBERUS_VPC_ID", "CERBERUS_CONTROL_INSTANCE_ID", "CERBERUS_CONTROL_VPC_IP", "CERBERUS_VPC_SUBNET")):
             raise HTTPException(status_code=503, detail="VPC sandbox jobs are not configured")
         if enabled:
-            job = job_registry.create(request.type, signals=ready_signals, target=request.target, target_runtime=request.target_runtime)
+            job = job_registry.create(request.type, signals=ready_signals, target=request.target, target_runtime=request.target_runtime, remediate=request.remediate)
         else:
             if job_registry.consume_sandbox_arm(request.arm_token.get_secret_value()) is None:
                 raise HTTPException(status_code=403, detail="Sandbox arm is invalid or expired")
-            job = job_registry.create(request.type, signals=ready_signals, target=request.target, target_runtime=request.target_runtime)
+            job = job_registry.create(request.type, signals=ready_signals, target=request.target, target_runtime=request.target_runtime, remediate=request.remediate)
     elif request.type == "scan":
         if request.approve_vm or request.netbird_setup_key is not None or request.arm_token is not None or request.diagnostic_upload is not None:
             raise HTTPException(status_code=400, detail="Scan jobs do not accept sandbox credentials")
