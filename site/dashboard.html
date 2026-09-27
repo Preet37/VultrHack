@@ -2,244 +2,248 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Cerberus</title>
-<meta name="description" content="Watch a repository's code run two VMs deep on Vultr — agents find, prove and patch its vulnerabilities, and every escape attempt stops at the isolation boundary.">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Cerberus — the disposable machine</title>
+<meta name="description" content="Watch Cerberus spin up a whole disposable machine on Vultr, run a repository's untrusted code on it, find and prove and patch its vulnerabilities, and throw the machine away — with nothing able to leave it.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800;900&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
 <style>
   :root{
-    --ink:#171a21; --ink2:#535966; --faint:#8b91a0; --line:#e5e8ee; --line2:#dbdfe7;
-    --card:#ffffff; --blue:#2f6bed; --green:#199a5b; --red:#d8402f; --amber:#c07a12;
-    --code:#0d1016; --cink:#e6e9f0; --cfaint:#7b8394;
-    --sans:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-    --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+    --bg:#ebebe7;--panel:#fff;--panel-2:#f4f4f0;--line:#e4e4de;--line-2:#d7d7d0;
+    --ink:#16181c;--ink-2:#5f6572;--ink-3:#9aa0aa;
+    --lime:#c8f23a;--lime-2:#b5e019;--red:#e5484d;--red-bg:#fdecec;--green:#23a15c;--green-bg:#e7f7ee;--amber:#d98e1f;
+    --scr:#0f1217;--scr-2:#161b22;--sdim:#6f7a8a;--scy:#72c9ff;--sred:#ff707a;--sgrn:#5fe29a;--samb:#f4c451;--sink:#c6cedb;
+    --disp:"Archivo","Inter",system-ui,sans-serif;--sans:"Inter",system-ui,-apple-system,sans-serif;--mono:"JetBrains Mono",ui-monospace,Menlo,monospace;
+    --sh:0 1px 2px rgba(22,24,28,.05),0 2px 6px rgba(22,24,28,.04);--sh-lg:0 18px 48px rgba(22,24,28,.13),0 4px 12px rgba(22,24,28,.06);
   }
   *{box-sizing:border-box}
-  body{margin:0;color:var(--ink);font-family:var(--sans);-webkit-font-smoothing:antialiased;line-height:1.5;min-height:100vh;
-    background:
-      radial-gradient(1000px 560px at 8% -10%,#f1f0ff 0,transparent 58%),
-      radial-gradient(900px 520px at 96% 0,#e7f4f0 0,transparent 55%),
-      linear-gradient(180deg,#eef1f5,#e8ecf1);background-attachment:fixed}
-  .mono{font-family:var(--mono)}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1180px;margin:0 auto;padding-inline:20px}
+  .eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--ink-2)}
+  h1,h2,h3{font-family:var(--disp);letter-spacing:-.02em;margin:0}
 
-  .top{display:flex;align-items:center;gap:12px;max-width:1360px;margin:0 auto;padding:16px 24px 4px}
-  .brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:17px;letter-spacing:-.2px}
-  .brand canvas{display:block}
-  .sub{color:var(--faint);font-size:13px;margin-left:4px}
-  @media(max-width:640px){.sub{display:none}}
+  .nav{position:sticky;top:0;z-index:50;padding:12px 0}
+  .nav .in{display:flex;align-items:center;gap:14px;background:rgba(255,255,255,.82);backdrop-filter:blur(12px);border:1px solid var(--line);border-radius:999px;padding:8px 8px 8px 16px;box-shadow:var(--sh)}
+  .brand{display:flex;align-items:center;gap:9px;margin-right:auto}
+  .brand .mk{width:26px;height:26px;border-radius:8px;background:var(--ink);display:flex;align-items:center;justify-content:center}
+  .brand .nm{font-family:var(--disp);font-weight:800;font-size:16px}
+  .repochip{display:inline-flex;align-items:center;gap:8px;background:var(--panel-2);border:1px solid var(--line);border-radius:999px;padding:7px 8px 7px 13px}
+  .repochip .g{font-family:var(--mono);font-size:11px;color:var(--ink-3)}
+  .repochip input{border:0;outline:0;background:transparent;font-family:var(--mono);font-size:12px;color:var(--ink);width:150px}
+  .btn{font-family:var(--sans);font-weight:600;font-size:13.5px;background:var(--ink);color:#fff;border:none;border-radius:999px;padding:10px 17px;display:inline-flex;align-items:center;gap:9px;cursor:pointer;transition:transform .15s,background .15s}
+  .btn:hover{background:#000}.btn:active{transform:translateY(1px)}.btn:disabled{opacity:.55;cursor:default}
+  .btn .tri{width:0;height:0;border-left:8px solid var(--lime);border-top:5px solid transparent;border-bottom:5px solid transparent}
+  @media(max-width:640px){.repochip{display:none}}
 
-  .stage{max-width:1360px;margin:0 auto;padding:10px 24px 44px;display:grid;grid-template-columns:300px 132px minmax(0,1fr);gap:0;align-items:stretch}
-  @media(max-width:900px){.stage{grid-template-columns:1fr;gap:16px}}
+  header.hero{padding:34px 0 8px}
+  .hero .eyebrow{color:#7d9a12}
+  .hero h1{font-weight:900;font-size:clamp(30px,4.6vw,50px);line-height:.98;margin:10px 0 0}
+  .hero h1 em{font-style:normal;color:var(--ink-2)}
+  .hero p{color:var(--ink-2);font-size:15.5px;line-height:1.55;max-width:60ch;margin:14px 0 0}
 
-  /* product side */
-  .product{background:var(--card);border:1px solid var(--line2);border-radius:16px;padding:18px;box-shadow:0 16px 40px -26px rgba(20,25,40,.5);
-    display:flex;flex-direction:column;z-index:2}
-  .plabel{font-family:var(--mono);font-size:10.5px;letter-spacing:2px;text-transform:uppercase;color:var(--faint)}
-  .product h2{font-size:16px;margin:4px 0 14px;font-weight:600}
-  .repo{display:flex;align-items:center;gap:7px;border:1px solid var(--line2);border-radius:10px;padding:7px 8px 7px 11px;background:#fbfcfd}
-  .repo .g{font-family:var(--mono);font-size:11px;color:var(--faint)}
-  .repo input{flex:1;min-width:0;border:0;outline:0;background:transparent;font-family:var(--mono);font-size:12.5px;color:var(--ink)}
-  .go{width:100%;margin-top:10px;background:var(--ink);color:#fff;border:0;border-radius:10px;padding:11px;font-weight:600;font-size:14px;cursor:pointer}
-  .go:hover{background:#000}.go[disabled]{opacity:.5;cursor:progress}
-  .result{margin-top:16px;border-top:1px solid var(--line);padding-top:14px;flex:1}
-  .rbig{font-size:34px;font-weight:700;letter-spacing:-1px;line-height:1}
-  .rbig small{font-size:14px;color:var(--faint);font-weight:500}
-  .rline{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink2);margin-top:12px}
-  .rline .ic{width:16px;height:16px;flex:0 0 auto}
-  .rline.pending{color:var(--faint)}
-  .rok{color:var(--green);font-weight:600}
+  /* pipeline */
+  .pipe{display:grid;grid-template-columns:repeat(6,1fr);gap:0;position:relative;margin:26px 0 6px}
+  .pnode{display:flex;flex-direction:column;align-items:center;text-align:center;padding:0 6px;position:relative}
+  .conn{position:absolute;top:19px;left:calc(-50% + 19px);width:calc(100% - 38px);height:2px;background:var(--line-2);overflow:hidden}
+  .conn i{position:absolute;inset:0;background:var(--ink);transform:scaleX(0);transform-origin:left;transition:transform .5s cubic-bezier(.4,0,.2,1)}
+  .pnode.fill .conn i{transform:scaleX(1)}
+  .pnode .sq{width:38px;height:38px;border-radius:11px;background:var(--panel-2);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;position:relative;z-index:2;transition:.3s;font-family:var(--mono);font-size:13px;color:var(--ink-3)}
+  .pnode.active .sq{background:var(--lime);border-color:var(--lime);box-shadow:0 0 0 5px rgba(200,242,58,.4);color:var(--ink)}
+  .pnode.done .sq{background:var(--green-bg);border-color:rgba(35,161,92,.3);color:var(--green)}
+  .pnode .pt{font-weight:600;font-size:12px;margin-top:8px}
+  .pnode .pd{font-size:10px;color:var(--ink-3);margin-top:2px}
+  @media(max-width:720px){.pipe{grid-template-columns:1fr;gap:8px}.conn{display:none}.pnode{flex-direction:row;gap:11px;text-align:left}.pnode .pt{margin-top:0}}
 
-  /* connector */
-  .link{align-self:center;display:flex;align-items:center;padding:0 2px;position:relative;z-index:1}
-  .link .rail{width:42px;height:2px;background:var(--line2);position:relative}
-  .link .rail::after{content:"";position:absolute;top:-3px;width:8px;height:8px;border-radius:50%;background:var(--blue);opacity:0;box-shadow:0 0 10px var(--blue)}
-  .link.run .rail::after{animation:travel 1.1s linear infinite}
-  @keyframes travel{0%{left:-6px;opacity:0}20%{opacity:1}80%{opacity:1}100%{left:42px;opacity:0}}
-  .link .lab{position:absolute;top:-24px;left:50%;transform:translateX(-50%);white-space:nowrap;font-family:var(--mono);font-size:10px;color:var(--faint)}
-  @media(max-width:900px){.link{transform:rotate(90deg);margin:-4px auto}.link .lab{top:-20px}}
+  /* the desktop VM window */
+  .vmwin{background:var(--panel);border:1px solid var(--line-2);border-radius:18px;box-shadow:var(--sh-lg);overflow:hidden;margin-top:14px;transition:filter .8s}
+  .vmwin.off{filter:grayscale(.9) brightness(.6)}
+  .vmbar{display:flex;align-items:center;gap:10px;padding:11px 14px;background:linear-gradient(180deg,#fbfbf9,#f4f4f0);border-bottom:1px solid var(--line)}
+  .lights{display:flex;gap:6px}.lights i{width:11px;height:11px;border-radius:50%}
+  .lights .r{background:#ff5f57}.lights .y{background:#febc2e}.lights .g{background:#28c840}
+  .vmbar .ttl{font-family:var(--mono);font-size:12px;color:var(--ink-2)}.vmbar .ttl b{color:var(--ink)}
+  .vmbar .kill{margin-left:auto;font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-2);background:var(--panel);border:1px solid var(--line-2);border-radius:999px;padding:4px 10px}
+  .vmmenu{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:8px 14px;background:var(--panel-2);border-bottom:1px solid var(--line);font-family:var(--mono);font-size:10.5px;color:var(--ink-2)}
+  .vmmenu b{color:var(--ink)}
+  .vmmenu .pill{display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid var(--line-2);border-radius:999px;padding:3px 9px}
+  .vmmenu .pill.iso{color:#5a7a0a;border-color:rgba(181,224,25,.6);background:rgba(200,242,58,.16)}
+  .vmmenu .pill i{width:6px;height:6px;border-radius:50%;background:var(--green)}
+  .vmmenu .pill.iso i{background:var(--lime-2)}
+  .vmmenu .sp{margin-left:auto}
 
-  /* backend: nested boxes */
-  .infra{position:relative;z-index:2}
-  .box{position:relative;border-radius:16px;padding:20px 16px 16px}
-  .tab{position:absolute;top:-10px;left:16px;display:inline-flex;align-items:center;gap:6px;background:var(--card);
-    border:1px solid var(--line2);border-radius:999px;padding:3px 11px;font-family:var(--mono);font-size:10.5px;font-weight:500;color:var(--ink2)}
-  .tab .d{width:6px;height:6px;border-radius:50%;background:var(--faint)}
-  .tab .d.on{background:var(--green);animation:beat 1.4s infinite}
-  @keyframes beat{50%{opacity:.4}}
-  .host{border:1px solid var(--line2);background:#f6f8fb}
-  .host>.tab .d.on{background:var(--blue)}
-  /* the isolation boundary is the gVisor VM edge */
-  .vm{border:2px solid #c4d3cb;background:#eef4f0;margin-top:6px;transition:border-color .4s,filter .8s,opacity .8s}
-  .vm.hot{border-color:var(--green)}
-  .vm.dead{filter:grayscale(.7);opacity:.55}
-  .vm>.tab{border-color:#bcd0c6}
-  .bmark{position:absolute;top:50%;right:-1px;transform:translate(50%,-50%);display:inline-flex;align-items:center;gap:6px;
-    background:#fff;border:1px solid var(--red);color:var(--red);border-radius:999px;padding:3px 10px;font-family:var(--mono);font-size:10.5px;
-    opacity:0;transition:opacity .25s;white-space:nowrap;z-index:6}
-  .bmark.show{opacity:1}
-  .agentbar{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
-  .chip{display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid var(--line2);border-radius:999px;padding:4px 10px;font-size:11.5px;color:var(--faint)}
-  .chip .d{width:6px;height:6px;border-radius:50%;background:#d5d9e0}
-  .chip.on{color:var(--ink);border-color:#c9d3ea}.chip.on .d{background:var(--blue);animation:beat 1.2s infinite}
-  .chip.done{color:var(--ink2)}.chip.done .d{background:var(--green)}
-  /* untrusted code box (dark, innermost) */
-  .code{position:relative;background:var(--code);border-radius:11px;padding:12px 13px;overflow:hidden}
-  .code>.ctab{display:flex;align-items:center;gap:8px;color:var(--cfaint);font-family:var(--mono);font-size:10.5px;margin-bottom:8px}
-  .code>.ctab b{color:#ffb59a}
-  .term{font-family:var(--mono);font-size:11.5px;line-height:1.6;height:250px;overflow:auto;color:var(--cink)}
-  .term::-webkit-scrollbar{width:6px}.term::-webkit-scrollbar-thumb{background:#242a34;border-radius:6px}
-  .ln{white-space:pre-wrap;word-break:break-word;opacity:0;transition:opacity .2s}.ln.show{opacity:1}
-  .c-f{color:var(--cfaint)}.c-b{color:#ff7a6b}.c-g{color:#54d18d}.c-y{color:#ffcf6a}.c-bl{color:#78a9ff}.c-p{color:#b79bff}
-  .escape{position:absolute;width:9px;height:9px;border-radius:50%;background:var(--red);box-shadow:0 0 10px var(--red);
-    left:40%;top:60px;opacity:0;transition:transform 1s cubic-bezier(.5,0,.6,1),opacity .3s;z-index:5}
-  .vmcap{font-family:var(--mono);font-size:10.5px;color:var(--ink2);margin-top:9px;padding-left:2px;min-height:15px}
-  .vmcap .drop{color:var(--green)}
+  /* the screen (the VM's actual display) */
+  .screen{position:relative;background:radial-gradient(120% 120% at 20% 0,#151a22,#0d1015);padding:16px;min-height:360px;
+    background-image:radial-gradient(120% 120% at 20% 0,#151a22,#0d1015),linear-gradient(rgba(255,255,255,.02) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.02) 1px,transparent 1px);background-size:auto,26px 26px,26px 26px}
+  .desknote{position:absolute;left:16px;top:14px;font-family:var(--mono);font-size:10px;color:#4a5361;letter-spacing:.05em}
+  .tws{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:22px}
+  @media(max-width:760px){.tws{grid-template-columns:1fr}}
+  .tw{background:var(--scr);border:1px solid #232a34;border-radius:11px;overflow:hidden;box-shadow:0 12px 30px rgba(0,0,0,.35)}
+  .tw .twh{display:flex;align-items:center;gap:7px;padding:7px 11px;background:#141a22;border-bottom:1px solid #212834}
+  .tw .twh i{width:7px;height:7px;border-radius:50%;background:var(--sdim);transition:.3s}
+  .tw.run .twh i{background:var(--scy);box-shadow:0 0 7px var(--scy)}
+  .tw.done .twh i{background:var(--sgrn);box-shadow:0 0 7px var(--sgrn)}
+  .tw.breach .twh i{background:var(--sred);box-shadow:0 0 7px var(--sred)}
+  .tw .twh .n{font-family:var(--mono);font-size:10px;color:#9fb0c4}
+  .tw .twh .tag{margin-left:auto;font-family:var(--mono);font-size:8.5px;color:var(--sdim);border:1px solid #262d38;border-radius:5px;padding:2px 6px}
+  .tw .b{padding:10px 12px;height:150px;overflow:hidden;font-family:var(--mono);font-size:10.5px;line-height:1.65;color:var(--sink)}
+  .tw .b .ln{opacity:0;transform:translateY(3px);animation:ln .2s ease forwards;white-space:pre-wrap;word-break:break-word}
+  @keyframes ln{to{opacity:1;transform:none}}
+  .b .d{color:var(--sdim)}.b .c{color:var(--scy)}.b .r{color:var(--sred)}.b .g{color:var(--sgrn)}.b .a{color:var(--samb)}
 
-  .foot{max-width:1360px;margin:0 auto;padding:2px 24px 40px;display:flex;gap:14px;align-items:center;font-family:var(--mono);font-size:11.5px;color:var(--faint)}
-  .foot b{color:var(--ink2)}.foot a{color:var(--ink2);text-decoration:none;border-bottom:1px solid var(--line2)}
+  /* nested untrusted-process frame + isolation widget */
+  .nested{margin-top:12px;border:1px dashed #33404f;border-radius:11px;padding:9px 11px;display:flex;align-items:center;gap:10px}
+  .nested .lab{font-family:var(--mono);font-size:10px;color:#8895a6}.nested .lab b{color:#ffb59a}
+  .nested .bar{margin-left:auto;display:flex;gap:14px;font-family:var(--mono);font-size:10px;color:#8895a6}
+  .nested .bar b{color:#cdd6e2}
+  /* desktop toast */
+  .toast{position:absolute;right:16px;bottom:16px;max-width:280px;background:#12171f;border:1px solid #26303c;border-radius:12px;box-shadow:0 16px 40px rgba(0,0,0,.45);padding:12px 14px;
+    transform:translateY(14px);opacity:0;transition:.3s cubic-bezier(.2,.7,.2,1);z-index:8}
+  .toast.show{transform:none;opacity:1}
+  .toast .th{display:flex;align-items:center;gap:9px;font-family:var(--disp);font-weight:700;font-size:12.5px;color:#eaeef4}
+  .toast .th .dot{width:9px;height:9px;border-radius:50%;flex:none}
+  .toast.red .th .dot{background:var(--sred)}.toast.green .th .dot{background:var(--sgrn)}
+  .toast .ts{font-family:var(--mono);font-size:10px;color:#8895a6;margin-top:5px;line-height:1.5}
+
+  /* result strip */
+  .result{display:grid;grid-template-columns:repeat(4,1fr);gap:0;background:var(--ink);border-radius:16px;overflow:hidden;margin-top:14px}
+  @media(max-width:680px){.result{grid-template-columns:1fr 1fr}}
+  .result .m{padding:18px 18px;border-right:1px solid rgba(255,255,255,.08)}
+  .result .m .mv{font-family:var(--disp);font-weight:800;font-size:26px;color:#fff;font-variant-numeric:tabular-nums}
+  .result .m .mv em{font-style:normal;color:var(--lime)}
+  .result .m .mk{font-family:var(--mono);font-size:9.5px;letter-spacing:.07em;text-transform:uppercase;color:rgba(255,255,255,.55);margin-top:5px}
+
+  footer{padding:26px 0 40px;color:var(--ink-3);font-family:var(--mono);font-size:11px;text-align:center;line-height:1.9}
+  footer b{color:var(--ink-2);font-weight:400}
   @media(prefers-reduced-motion:reduce){*{animation-duration:.001s!important;transition-duration:.1s!important}}
 </style>
 </head>
 <body>
-  <div class="top">
-    <div class="brand"><canvas id="mk" width="26" height="26"></canvas> Cerberus</div>
-    <span class="sub">run a repo two VMs deep on Vultr — watch nothing get out</span>
-  </div>
+<nav class="nav"><div class="wrap"><div class="in">
+  <div class="brand"><span class="mk"><svg viewBox="0 0 24 24" width="15" height="15" fill="none"><path d="M5 12l4 4 10-11" stroke="#c8f23a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span class="nm">Cerberus</span></div>
+  <div class="repochip"><span class="g">github.com/</span><input id="repo" value="Preet37/seeded_flask" spellcheck="false" aria-label="Repository"></div>
+  <button class="btn" id="run"><span class="tri"></span><span id="rl">Run scan</span></button>
+</div></div></nav>
 
-  <div class="stage">
-    <!-- PRODUCT / user side -->
-    <div class="product">
-      <div class="plabel">You</div>
-      <h2>Scan a repository</h2>
-      <div class="repo"><span class="g">github.com/</span><input id="repo" value="seeded/vulnerable-shop" spellcheck="false" aria-label="Repository"></div>
-      <button class="go" id="run">Run scan</button>
-      <div class="result">
-        <div class="rbig"><span id="fixed">0</span><small> / <span id="found">0</span> fixed</small></div>
-        <div class="rline pending" id="r1"><span class="ic">◔</span> waiting to run</div>
-        <div class="rline pending" id="r2"><span class="ic">◔</span> nothing left your machine</div>
-      </div>
+<div class="wrap">
+  <header class="hero">
+    <span class="eyebrow">The disposable machine · live</span>
+    <h1>A whole computer, <em>thrown away.</em></h1>
+    <p>Cerberus boots a real disposable VM on Vultr, runs the repository's untrusted code on it, and turns its agents loose — find, prove, patch, re-prove. When it's done the machine is destroyed, and nothing was ever able to leave it.</p>
+  </header>
+
+  <div class="pipe" id="pipe"></div>
+
+  <div class="vmwin" id="vmwin">
+    <div class="vmbar"><span class="lights"><i class="r"></i><i class="y"></i><i class="g"></i></span>
+      <span class="ttl">disposable-vm · <b id="vmhost">sbx-a1f4</b> · vx1-g-2c-8g · ord</span>
+      <span class="kill" id="kill">destroyed on finish</span></div>
+    <div class="vmmenu">
+      <span class="pill iso"><i></i> gVisor runsc</span>
+      <span>uptime <b id="uptime">00:00</b></span>
+      <span class="pill"><i></i> egress <b id="egress" style="color:var(--green)">denied</b></span>
+      <span class="pill">0 open ports</span>
+      <span class="sp"></span>
+      <span>blast radius <b id="blast">0 bytes</b></span>
     </div>
-
-    <!-- connector -->
-    <div class="link" id="link"><div class="rail"></div><span class="lab">dispatch · private network</span></div>
-
-    <!-- BACKEND / infrastructure -->
-    <div class="infra">
-      <div class="box host"><span class="tab"><span class="d" id="d-host"></span> Vultr · VX1 · sandbox host</span>
-        <div class="box vm" id="vm"><span class="tab"><span class="d" id="d-vm"></span> disposable VM · gVisor / runsc · own kernel</span>
-          <span class="bmark" id="bmark">⊘ escape blocked at the boundary</span>
-          <div class="agentbar">
-            <span class="chip" data-c="recon"><span class="d"></span> recon</span>
-            <span class="chip" data-c="triage"><span class="d"></span> triage · Vultr</span>
-            <span class="chip" data-c="exploit"><span class="d"></span> exploit</span>
-            <span class="chip" data-c="patch"><span class="d"></span> patch</span>
-            <span class="chip" data-c="review"><span class="d"></span> review · 2nd model</span>
-          </div>
-          <div class="code">
-            <div class="ctab">↳ <b id="codename">seeded/vulnerable-shop</b> · the repo's own code, untrusted</div>
-            <div class="term" id="term"><span class="ln show c-f">// idle — the repository's code runs in here</span></div>
-            <span class="escape" id="escape"></span>
-          </div>
-          <div class="vmcap" id="vmcap"></div>
-        </div>
+    <div class="screen" id="screen">
+      <div class="desknote">disposable VM · runs inside gVisor on the Vultr sandbox host · no path to the control plane</div>
+      <div class="tws">
+        <div class="tw" id="tw_a"><div class="twh"><i></i><span class="n">exploit · prove</span><span class="tag">canary oracle</span></div><div class="b" id="b_a"></div></div>
+        <div class="tw" id="tw_b"><div class="twh"><i></i><span class="n">patch · re-prove</span><span class="tag">2nd model review</span></div><div class="b" id="b_b"></div></div>
       </div>
+      <div class="nested"><span class="lab">↳ nested: <b id="nestrepo">Preet37/seeded_flask</b> · the repo's own code runs one level deeper, untrusted</span>
+        <span class="bar"><span>found <b id="n-found">0</b></span><span>fixed <b id="n-fixed">0</b></span><span>host DROP <b id="n-drop">+0</b></span></span></div>
+      <div class="toast" id="toast"><div class="th"><span class="dot"></span><span id="toast-h">—</span></div><div class="ts" id="toast-s"></div></div>
     </div>
   </div>
 
-  <div class="foot"><span>isolation: gVisor + private network · <b>blast radius 0</b></span>
-    <span style="margin-left:auto">Vultr VX1 + Serverless Inference</span>
-    <a href="https://github.com/Preet37/VultrHack" target="_blank" rel="noopener">source</a></div>
+  <div class="result">
+    <div class="m"><div class="mv" id="r-conf">0</div><div class="mk">confirmed with a canary</div></div>
+    <div class="m"><div class="mv" id="r-cert">0/5</div><div class="mk">certified closed</div></div>
+    <div class="m"><div class="mv"><em id="r-blast">0</em> bytes</div><div class="mk">left the machine</div></div>
+    <div class="m"><div class="mv"><em id="r-tear">live</em></div><div class="mk">machine after teardown</div></div>
+  </div>
+
+  <footer>disposable <b>vx1-g-2c-8g-120s</b> at <b>$0.076/hr</b> · destroyed on completion · untrusted code never touches the control plane · <a href="https://github.com/Preet37/VultrHack" style="color:var(--ink-2)">source</a></footer>
+</div>
 
 <script>
 (function(){
   "use strict";
-  var $=function(s,r){return (r||document).querySelector(s)};
-  var sleep=function(ms){return new Promise(function(r){setTimeout(r,ms)})};
+  var reduced=matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var el=function(id){return document.getElementById(id)};
+  var sleep=function(ms){return new Promise(function(r){setTimeout(r,reduced?0:ms)})};
 
-  (function(){var c=$('#mk');if(!c)return;var x=c.getContext('2d'),t=0,P=[[13,6],[6,19],[20,19]],col=['#2f6bed','#199a5b','#b79bff'];
-    (function f(){x.clearRect(0,0,26,26);t+=.03;x.strokeStyle='rgba(23,26,33,.32)';x.lineWidth=1.3;
-      x.beginPath();x.moveTo(P[0][0],P[0][1]);x.lineTo(P[1][0],P[1][1]);x.lineTo(P[2][0],P[2][1]);x.closePath();x.stroke();
-      for(var i=0;i<3;i++){x.beginPath();x.fillStyle=col[i];x.arc(P[i][0],P[i][1],2.9+.4*Math.sin(t+i*2),0,7);x.fill();}
-      x.beginPath();x.fillStyle='#171a21';x.arc(13,14,1.7,0,7);x.fill();requestAnimationFrame(f);})();})();
+  var STAGES=[["Boot","disposable VM"],["Recon","map the repo"],["Prove","canary in a box"],["Patch","fix a copy"],["Certify","2nd model"],["Destroy","404"]];
+  var pipe=el("pipe");
+  STAGES.forEach(function(s,i){var n=document.createElement("div");n.className="pnode";n.id="pn"+i;
+    n.innerHTML=(i>0?'<div class="conn"><i></i></div>':'')+'<div class="sq">'+String(i+1).padStart(2,"0")+'</div><div class="pt">'+s[0]+'</div><div class="pd">'+s[1]+'</div>';pipe.appendChild(n);});
+  function stage(i){for(var k=0;k<STAGES.length;k++){el("pn"+k).className="pnode"+(k<i?" done fill":k===i?" active fill":"");}}
 
-  var term=$('#term');
-  function line(cls,txt){return new Promise(function(res){var d=document.createElement('div');d.className='ln '+(cls||'');d.textContent=txt;
-    term.appendChild(d);term.scrollTop=term.scrollHeight;requestAnimationFrame(function(){d.classList.add('show');});
-    setTimeout(res,Math.min(44+txt.length*1.6,150));});}
-  function chip(c,st){var n=document.querySelector('.chip[data-c="'+c+'"]');if(!n)return;n.classList.remove('on','done');if(st)n.classList.add(st);}
-  function rline(el,ok,txt){var n=$(el);n.classList.toggle('pending',!ok);n.querySelector('.ic').textContent=ok?'✓':'◔';
-    if(ok)n.querySelector('.ic').style.color='var(--green)';n.lastChild.textContent=' '+txt;}
+  function tl(box,cls,txt){var b=el("b_"+box);var d=document.createElement("div");d.className="ln "+(cls||"");d.textContent=(cls==="c"?"› ":"")+txt;
+    b.appendChild(d);while(b.children.length>8)b.removeChild(b.firstChild);}
+  function tw(box,st){el("tw_"+box).className="tw "+(st||"")}
+  function toast(kind,h,s){var t=el("toast");t.className="toast show "+kind;el("toast-h").textContent=h;el("toast-s").textContent=s;}
+  function toastHide(){el("toast").className="toast"}
 
   var VULNS=[
-    {f:'sql injection',ep:'/product?id',can:'CANARY-a1b2c3d4…',fix:'parameterized query'},
-    {f:'path traversal',ep:'/download?file',can:'FILECANARY-9f8e7d6c…',fix:"reject '..' · resolve in base"},
-    {f:'command injection',ep:'/net?host',can:'FILECANARY-9f8e7d6c…',fix:'argv list · shell off'},
-    {f:'ssrf',ep:'/fetch?url',can:'SSRFCANARY-0f1e2d3c…',fix:'block private/loopback · 403'},
-    {f:'auth bypass / idor',ep:'/account?id',can:'ACCTCANARY-1a2b3c4d…',fix:'enforce object owner'}
+    {f:"sql injection",box:"a",can:"CANARY-a1b2c3d4…",fix:"parameterized query"},
+    {f:"path traversal",box:"b",can:"FILECANARY-9f8e7d6c…",fix:"reject '..' · resolve in base"},
+    {f:"command injection",box:"a",can:"FILECANARY-9f8e7d6c…",fix:"argv list · shell off"},
+    {f:"ssrf",box:"b",can:"SSRFCANARY-0f1e2d3c…",fix:"block private/loopback",breach:true},
+    {f:"auth bypass / idor",box:"a",can:"ACCTCANARY-1a2b3c4d…",fix:"enforce object owner"}
   ];
 
-  async function blockedEscape(){
-    // a probe from inside the code tries to reach the host; it stops at the gVisor boundary
-    var e=$('#escape');e.style.transition='none';e.style.transform='none';e.style.opacity='0';e.style.left='38%';e.style.top='64px';
-    // force reflow then animate toward the right edge (the boundary)
-    void e.offsetWidth;e.style.transition='transform 1s cubic-bezier(.5,0,.6,1),opacity .3s';
-    e.style.opacity='1';e.style.transform='translate(240px,-30px)';
-    await sleep(950);
-    $('#bmark').classList.add('show');e.style.opacity='0';
-    $('#vmcap').innerHTML='<span class="drop">kernel DROP +2</span> · cerberus-os-drop DPT=65000 · nothing reached the host';
-    await sleep(1400);$('#bmark').classList.remove('show');
-  }
+  var running=false,upt=0,uptId=null;
+  function startUptime(){upt=0;uptId=setInterval(function(){upt++;var m=String((upt/60)|0).padStart(2,"0"),s=String(upt%60).padStart(2,"0");el("uptime").textContent=m+":"+s;},1000);}
+  function stopUptime(){if(uptId)clearInterval(uptId);}
 
-  var running=false;
   async function run(){
-    if(running)return;running=true;$('#run').disabled=true;$('#run').textContent='Running…';
-    term.innerHTML='';$('#vmcap').textContent='';$('#bmark').classList.remove('show');$('#vm').classList.remove('dead');
-    ['recon','triage','exploit','patch','review'].forEach(function(c){chip(c,'');});
-    $('#fixed').textContent='0';$('#found').textContent='0';
-    rline('#r1',false,'dispatching to a disposable VM…');rline('#r2',false,'nothing left your machine');
-    var repo=($('#repo').value||'seeded/vulnerable-shop');$('#codename').textContent=repo;
-    $('#d-host').classList.add('on');$('#link').classList.add('run');
-    await sleep(700);
-    $('#d-vm').classList.add('on');$('#vm').classList.add('hot');
-    await line('c-f','$ boot disposable VM · gVisor default runtime');
-    await line('c-g','✓ own kernel · /dev/kvm · 4.19.0-gvisor · exit 0');
+    if(running)return;running=true;el("run").disabled=true;el("rl").textContent="Running…";
+    el("b_a").innerHTML="";el("b_b").innerHTML="";tw("a","");tw("b","");toastHide();
+    el("vmwin").classList.remove("off");el("egress").textContent="denied";el("egress").style.color="var(--green)";
+    ["r-conf","n-found","n-fixed"].forEach(function(i){el(i).textContent="0"});el("r-cert").textContent="0/5";el("r-blast").textContent="0";el("n-drop").textContent="+0";el("r-tear").textContent="live";el("blast").textContent="0 bytes";
+    var repo=el("repo").value||"Preet37/seeded_flask";el("nestrepo").textContent=repo;
+    startUptime();
 
-    chip('recon','on');await line('c-f','recon: mapping routes & inputs');chip('recon','done');
-    await line('c-f','  7 routes · 5 inputs');
-    chip('triage','on');await line('c-bl','triage (Vultr deepseek): 5 sinks reach ≥ confidence 7');chip('triage','done');
+    stage(0);tw("a","run");tw("b","run");
+    tl("a","c","boot disposable VM · gVisor default runtime");
+    tl("a","g","✓ own kernel · /dev/kvm · 4.19.0-gvisor");await sleep(700);
+    stage(1);tl("a","d","recon: 7 routes · 5 inputs · triage on Vultr → 5 ranked");await sleep(650);
 
-    var found=0,fixed=0;
+    stage(2);var found=0,fixed=0,drop=0;
     for(var i=0;i<VULNS.length;i++){var v=VULNS[i];
-      chip('exploit','on');
-      await line('c-b','● '+v.f+'  '+v.ep);
-      await line('c-f','  canary '+v.can+' left the box → confirmed');
-      found++;$('#found').textContent=found;rline('#r1',false,found+' vulnerabilities found…');
-      chip('exploit','done');chip('patch','on');
-      await line('c-y','  patch → '+v.fix+' · re-exploit blocked');
-      chip('patch','done');chip('review','on');
-      await line('c-g','  2nd model (independent): closed, no over-block ✓ certified');
-      chip('review','done');
-      fixed++;$('#fixed').textContent=fixed;
-      await sleep(80);
+      tw(v.box,"run");
+      tl(v.box,"r","● "+v.f);
+      if(v.breach){
+        tl(v.box,"r","outbound → blocked internal address · egress DROP");
+        tw(v.box,"breach");el("egress").textContent="DROP";el("egress").style.color="var(--red)";
+        drop+=2;el("n-drop").textContent="+"+drop;
+        toast("red","Egress blocked","the repo's code reached for an internal address — stopped at the host, nothing left the machine");
+        await sleep(1200);toast("green","Contained","blast radius 0 · request never left the VM");await sleep(700);
+        toastHide();tw(v.box,"run");el("egress").textContent="denied";el("egress").style.color="var(--green)";
+      }
+      tl(v.box,"c","canary "+v.can+" observed → confirmed");
+      found++;el("r-conf").textContent=found;el("n-found").textContent=found;
+      await sleep(220);
+      stage(3);tl(v.box,"a","patch → "+v.fix+" · re-exploit blocked");
+      stage(4);tl(v.box,"g","2nd model (independent): closed, no over-block ✓ certified");
+      fixed++;el("r-cert").textContent=fixed+"/5";el("n-fixed").textContent=fixed;
+      tw(v.box,"run");await sleep(160);
     }
-    rline('#r1',true,found+' vulnerabilities found and fixed');
+    tl("a","g","3 certified · sealing receipt");tl("b","g","2 certified · sealing receipt");
+    tw("a","done");tw("b","done");await sleep(500);
 
-    // the untrusted code tries to escape — contained at the boundary
-    chip('exploit','on');
-    await line('c-b','probe → reaching for host gateway 172.18.0.1');
-    await blockedEscape();
-    await line('c-bl','blocked at the gVisor boundary · nothing escaped');
-    chip('exploit','done');
-
-    await line('c-f','sandbox destroyed · instance …→ 404 · 0 remain');
-    $('#vm').classList.add('dead');$('#d-vm').classList.remove('on');$('#d-host').classList.remove('on');$('#link').classList.remove('run');
-    rline('#r2',true,'nothing left your machine');
-    $('#run').disabled=false;$('#run').textContent='Run again';running=false;
+    stage(5);stopUptime();
+    el("vmwin").classList.add("off");el("kill").textContent="destroyed";
+    el("r-tear").textContent="404";el("r-blast").textContent="0";
+    el("run").disabled=false;el("rl").textContent="Run again";running=false;
   }
-  $('#run').addEventListener('click',run);
-  setTimeout(run,500);
+  el("run").addEventListener("click",run);
+
+  var played=false;
+  new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting&&!played){played=true;setTimeout(run,400);}});},{threshold:.3}).observe(el("vmwin"));
 })();
 </script>
 </body>
