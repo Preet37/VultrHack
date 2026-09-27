@@ -96,6 +96,29 @@ async def instance_ready(request: Request, authorization: str | None = Header(de
     return Response(status_code=204)
 
 
+@app.post("/internal/failed")
+async def instance_failed(request: Request, authorization: str | None = Header(default=None)):
+    token = authorization[7:] if authorization and authorization.startswith("Bearer ") else ""
+    if not ready_signals.has(token):
+        raise HTTPException(status_code=404)
+    if len(await request.body()) > 512:
+        raise HTTPException(status_code=413)
+    try:
+        report = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400)
+    if (
+        not isinstance(report, dict) or set(report) != {"stage", "exit_code"}
+        or not isinstance(report["stage"], str)
+        or report["stage"] not in {"opensandbox_dependencies", "network_create", "opensandbox_config", "opensandbox_server", "isolation_probe", "ready_callback"}
+        or type(report["exit_code"]) is not int or not 1 <= report["exit_code"] <= 255
+    ):
+        raise HTTPException(status_code=400)
+    if not ready_signals.signal(token, {"failure_stage": report["stage"], "exit_code": report["exit_code"]}):
+        raise HTTPException(status_code=404)
+    return Response(status_code=204)
+
+
 @app.post("/internal/control-ready")
 async def control_ready(request: Request, authorization: str | None = Header(default=None)):
     token = authorization[7:] if authorization and authorization.startswith("Bearer ") else ""

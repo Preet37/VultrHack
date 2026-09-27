@@ -144,6 +144,8 @@ def test_private_ready_callback_requires_netbird_smoke_and_no_public_http():
     url = "http://100.124.55.15:8000/internal/ready"
     script = docker_user_data(url, "ready-token", True, "A" * 36, private_callback=True)
     assert url in script
+    assert "http://100.124.55.15:8000/internal/failed" in script
+    assert "trap cerberus_report_failure EXIT" in script
     assert script.count("A" * 36) == 1
     assert subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True).returncode == 0
     with pytest.raises(ValueError):
@@ -306,6 +308,25 @@ def test_ready_callback_rejects_invalid_opensandbox_result():
     asyncio.run(request())
 
 
+def test_private_failure_callback_rejects_untrusted_details_and_signals_safe_stage():
+    async def request():
+        token = ready_signals.register()
+        try:
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                path = "/internal/failed"
+                headers = {"Authorization": f"Bearer {token}"}
+                assert (await client.post(path, json={"stage": "isolation_probe", "exit_code": 1})).status_code == 404
+                assert (await client.post(path, headers=headers, json={"stage": "arbitrary", "exit_code": 1})).status_code == 400
+                assert (await client.post(path, headers=headers, json={"stage": "isolation_probe", "exit_code": 0})).status_code == 400
+                assert (await client.post(path, headers=headers, json={"stage": "isolation_probe", "exit_code": 1, "secret": "should-not-arrive"})).status_code == 400
+                assert (await client.post(path, headers=headers, json={"stage": "isolation_probe", "exit_code": 1})).status_code == 204
+            assert await ready_signals.wait(token, timeout=0.1) == {"failure_stage": "isolation_probe", "exit_code": 1}
+        finally:
+            ready_signals.unregister(token)
+
+    asyncio.run(request())
+
+
 def test_temporary_callback_server_exposes_no_other_routes():
     async def request():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=callback_app), base_url="http://test") as client:
@@ -315,10 +336,11 @@ def test_temporary_callback_server_exposes_no_other_routes():
                 await client.get("/openapi.json"),
                 await client.get("/internal/ready"),
                 await client.post("/internal/ready"),
+                await client.post("/internal/failed"),
             )
 
-    home, docs, schema, wrong_method, unauthorized = asyncio.run(request())
-    assert [response.status_code for response in (home, docs, schema, wrong_method, unauthorized)] == [404, 404, 404, 405, 404]
+    home, docs, schema, wrong_method, unauthorized, private_failure = asyncio.run(request())
+    assert [response.status_code for response in (home, docs, schema, wrong_method, unauthorized, private_failure)] == [404, 404, 404, 405, 404, 404]
 
 
 def test_ready_timeout():

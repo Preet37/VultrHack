@@ -181,8 +181,11 @@ def test_registry_refuses_to_start_when_active_jobs_fill_capacity():
     assert registry.create() is None
 
 
-@pytest.mark.parametrize("readiness_fails,missing_log,dns_exit", [(False, False, 1), (False, True, 1), (True, False, 1), (False, False, 0)])
-def test_sandbox_worker_proves_private_path_and_cleans_up(monkeypatch, readiness_fails, missing_log, dns_exit):
+@pytest.mark.parametrize("readiness_fails,missing_log,dns_exit,failed_stage", [
+    (False, False, 1, None), (False, True, 1, None), (True, False, 1, None),
+    (False, False, 0, None), (False, False, 1, "opensandbox_config"),
+])
+def test_sandbox_worker_proves_private_path_and_cleans_up(monkeypatch, readiness_fails, missing_log, dns_exit, failed_stage):
     calls = []
     destroyed = False
     proof = {
@@ -210,6 +213,8 @@ def test_sandbox_worker_proves_private_path_and_cleans_up(monkeypatch, readiness
         async def wait(self, token, timeout):
             if readiness_fails:
                 raise TimeoutError("No callback")
+            if failed_stage:
+                return {"failure_stage": failed_stage, "exit_code": 1}
             return proof
 
         def unregister(self, token):
@@ -245,9 +250,11 @@ def test_sandbox_worker_proves_private_path_and_cleans_up(monkeypatch, readiness
     assert destroyed and signals.unregistered
     assert ("DELETE", "/v2/instances/instance-123") in calls
     assert calls[-1] == ("GET", "/v2/instances/instance-123")
-    assert job.status == ("failed" if readiness_fails or missing_log or dns_exit == 0 else "completed")
+    assert job.status == ("failed" if readiness_fails or missing_log or dns_exit == 0 or failed_stage else "completed")
     assert "A" * 36 not in str(job.error) + str(job.events)
-    if not readiness_fails and not missing_log and dns_exit != 0:
+    if failed_stage:
+        assert failed_stage in job.error
+    if not readiness_fails and not missing_log and dns_exit != 0 and not failed_stage:
         assert job.result["destroyed"] is True
         assert job.result["opensandbox"]["exit_code"] == 0
         assert "A" * 36 not in str(job.result) + str(job.events)

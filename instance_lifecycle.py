@@ -104,11 +104,25 @@ def docker_user_data(callback_url, ready_token, opensandbox_spike=False, netbird
         from sandbox_platform import netbird_enrollment_user_data
 
         script += netbird_enrollment_user_data(netbird_setup_key)
+    if private_callback:
+        failure_url = callback_url.replace("/internal/ready", "/internal/failed")
+        script += (
+            "CERBERUS_STAGE=opensandbox_dependencies\n"
+            "cerberus_report_failure() {\n"
+            "    result=$?\n"
+            "    trap - EXIT\n"
+            "    if [ \"$result\" -ne 0 ]; then\n"
+            f"        printf '{{\"stage\":\"%s\",\"exit_code\":%s}}' \"$CERBERUS_STAGE\" \"$result\" | curl -fsS --max-time 10 -X POST -H {shlex.quote(f'Authorization: Bearer {ready_token}')} -H 'Content-Type: application/json' --data-binary @- {shlex.quote(failure_url)} >/dev/null 2>&1 || :\n"
+            "    fi\n"
+            "}\n"
+            "trap cerberus_report_failure EXIT\n"
+        )
     if opensandbox_spike:
         from sandbox_platform import opensandbox_spike_user_data
 
         script += opensandbox_spike_user_data(netbird=netbird_setup_key is not None)
-    return script + (
+    callback_stage = "CERBERUS_STAGE=ready_callback\n" if private_callback else ""
+    return script + callback_stage + (
         f"curl --fail --silent --show-error --retry 12 --retry-delay 5 --max-time 15 -X POST "
         f"-H {shlex.quote(f'Authorization: Bearer {ready_token}')} -H 'Content-Type: application/json' "
         f"--data-binary \"$proof\" {shlex.quote(callback_url)}\n"

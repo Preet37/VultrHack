@@ -114,6 +114,7 @@ async def run_sandbox_smoke_job(job, setup_key, signals):
 
     instance_id = None
     token = None
+    failure_stage = None
     await job.publish("running", "preflight")
     try:
         status = json.loads(subprocess.check_output(["netbird", "status", "--json"], text=True))
@@ -130,6 +131,9 @@ async def run_sandbox_smoke_job(job, setup_key, signals):
                 await api.wait_active(instance_id)
                 await job.publish("running", "bootstrap")
                 proof = await signals.wait(token, timeout=600)
+                if "failure_stage" in proof:
+                    failure_stage = proof["failure_stage"]
+                    raise RuntimeError("Sandbox bootstrap reported a bounded failure stage")
                 sandbox = proof.get("opensandbox")
                 isolation = sandbox.get("isolation") if isinstance(sandbox, dict) else None
                 if "netbird_ip" not in proof or not isinstance(isolation, dict) or "gvisor" not in sandbox.get("uname", "").lower():
@@ -174,7 +178,10 @@ async def run_sandbox_smoke_job(job, setup_key, signals):
             "destroyed": True,
         }
     except Exception:
-        job.error = f"Sandbox smoke failed; verify cleanup of instance {instance_id}" if instance_id else "Sandbox smoke failed before an instance ID was confirmed"
+        if failure_stage:
+            job.error = f"Sandbox bootstrap failed at {failure_stage}; verify cleanup of instance {instance_id}"
+        else:
+            job.error = f"Sandbox smoke failed; verify cleanup of instance {instance_id}" if instance_id else "Sandbox smoke failed before an instance ID was confirmed"
         await job.publish("failed", "teardown")
     else:
         await job.publish("completed", "complete")
