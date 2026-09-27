@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Cerberus — the disposable machine</title>
+<meta name="description" content="Watch Cerberus spin up a whole disposable machine on Vultr, run a repository's untrusted code on it, find and prove and patch its vulnerabilities, and throw the machine away — with nothing able to leave it.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800;900&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+  :root{
+    --bg:#ebebe7;--panel:#fff;--panel-2:#f4f4f0;--line:#e4e4de;--line-2:#d7d7d0;
+    --ink:#16181c;--ink-2:#5f6572;--ink-3:#9aa0aa;
+    --lime:#c8f23a;--lime-2:#b5e019;--red:#e5484d;--red-bg:#fdecec;--green:#23a15c;--green-bg:#e7f7ee;--amber:#d98e1f;
+    --scr:#0f1217;--scr-2:#161b22;--sdim:#6f7a8a;--scy:#72c9ff;--sred:#ff707a;--sgrn:#5fe29a;--samb:#f4c451;--sink:#c6cedb;
+    --disp:"Archivo","Inter",system-ui,sans-serif;--sans:"Inter",system-ui,-apple-system,sans-serif;--mono:"JetBrains Mono",ui-monospace,Menlo,monospace;
+    --sh:0 1px 2px rgba(22,24,28,.05),0 2px 6px rgba(22,24,28,.04);--sh-lg:0 18px 48px rgba(22,24,28,.13),0 4px 12px rgba(22,24,28,.06);
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1180px;margin:0 auto;padding-inline:20px}
+  .eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--ink-2)}
+  h1,h2,h3{font-family:var(--disp);letter-spacing:-.02em;margin:0}
+
+  .nav{position:sticky;top:0;z-index:50;padding:12px 0}
+  .nav .in{display:flex;align-items:center;gap:14px;background:rgba(255,255,255,.82);backdrop-filter:blur(12px);border:1px solid var(--line);border-radius:999px;padding:8px 8px 8px 16px;box-shadow:var(--sh)}
+  .brand{display:flex;align-items:center;gap:9px;margin-right:auto}
+  .brand .mk{width:26px;height:26px;border-radius:8px;background:var(--ink);display:flex;align-items:center;justify-content:center}
+  .brand .nm{font-family:var(--disp);font-weight:800;font-size:16px}
+  .repochip{display:inline-flex;align-items:center;gap:8px;background:var(--panel-2);border:1px solid var(--line);border-radius:999px;padding:7px 8px 7px 13px}
+  .repochip .g{font-family:var(--mono);font-size:11px;color:var(--ink-3)}
+  .repochip input{border:0;outline:0;background:transparent;font-family:var(--mono);font-size:12px;color:var(--ink);width:150px}
+  .btn{font-family:var(--sans);font-weight:600;font-size:13.5px;background:var(--ink);color:#fff;border:none;border-radius:999px;padding:10px 17px;display:inline-flex;align-items:center;gap:9px;cursor:pointer;transition:transform .15s,background .15s}
+  .btn:hover{background:#000}.btn:active{transform:translateY(1px)}.btn:disabled{opacity:.55;cursor:default}
+  .btn .tri{width:0;height:0;border-left:8px solid var(--lime);border-top:5px solid transparent;border-bottom:5px solid transparent}
+  @media(max-width:640px){.repochip{display:none}}
+
+  header.hero{padding:34px 0 8px}
+  .hero .eyebrow{color:#7d9a12}
+  .hero h1{font-weight:900;font-size:clamp(30px,4.6vw,50px);line-height:.98;margin:10px 0 0}
+  .hero h1 em{font-style:normal;color:var(--ink-2)}
+  .hero p{color:var(--ink-2);font-size:15.5px;line-height:1.55;max-width:60ch;margin:14px 0 0}
+
+  /* pipeline */
+  .pipe{display:grid;grid-template-columns:repeat(6,1fr);gap:0;position:relative;margin:26px 0 6px}
+  .pnode{display:flex;flex-direction:column;align-items:center;text-align:center;padding:0 6px;position:relative}
+  .conn{position:absolute;top:19px;left:calc(-50% + 19px);width:calc(100% - 38px);height:2px;background:var(--line-2);overflow:hidden}
+  .conn i{position:absolute;inset:0;background:var(--ink);transform:scaleX(0);transform-origin:left;transition:transform .5s cubic-bezier(.4,0,.2,1)}
+  .pnode.fill .conn i{transform:scaleX(1)}
+  .pnode .sq{width:38px;height:38px;border-radius:11px;background:var(--panel-2);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;position:relative;z-index:2;transition:.3s;font-family:var(--mono);font-size:13px;color:var(--ink-3)}
+  .pnode.active .sq{background:var(--lime);border-color:var(--lime);box-shadow:0 0 0 5px rgba(200,242,58,.4);color:var(--ink)}
+  .pnode.done .sq{background:var(--green-bg);border-color:rgba(35,161,92,.3);color:var(--green)}
+  .pnode .pt{font-weight:600;font-size:12px;margin-top:8px}
+  .pnode .pd{font-size:10px;color:var(--ink-3);margin-top:2px}
+  @media(max-width:720px){.pipe{grid-template-columns:1fr;gap:8px}.conn{display:none}.pnode{flex-direction:row;gap:11px;text-align:left}.pnode .pt{margin-top:0}}
+
+  /* the desktop VM window */
+  .vmwin{background:var(--panel);border:1px solid var(--line-2);border-radius:18px;box-shadow:var(--sh-lg);overflow:hidden;margin-top:14px;transition:filter .8s}
+  .vmwin.off{filter:grayscale(.9) brightness(.6)}
+  .vmbar{display:flex;align-items:center;gap:10px;padding:11px 14px;background:linear-gradient(180deg,#fbfbf9,#f4f4f0);border-bottom:1px solid var(--line)}
+  .lights{display:flex;gap:6px}.lights i{width:11px;height:11px;border-radius:50%}
+  .lights .r{background:#ff5f57}.lights .y{background:#febc2e}.lights .g{background:#28c840}
+  .vmbar .ttl{font-family:var(--mono);font-size:12px;color:var(--ink-2)}.vmbar .ttl b{color:var(--ink)}
+  .vmbar .kill{margin-left:auto;font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-2);background:var(--panel);border:1px solid var(--line-2);border-radius:999px;padding:4px 10px}
+  .vmmenu{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:8px 14px;background:var(--panel-2);border-bottom:1px solid var(--line);font-family:var(--mono);font-size:10.5px;color:var(--ink-2)}
+  .vmmenu b{color:var(--ink)}
+  .vmmenu .pill{display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid var(--line-2);border-radius:999px;padding:3px 9px}
+  .vmmenu .pill.iso{color:#5a7a0a;border-color:rgba(181,224,25,.6);background:rgba(200,242,58,.16)}
+  .vmmenu .pill i{width:6px;height:6px;border-radius:50%;background:var(--green)}
+  .vmmenu .pill.iso i{background:var(--lime-2)}
+  .vmmenu .sp{margin-left:auto}
+
+  /* the screen (the VM's actual display) */
+  .screen{position:relative;background:radial-gradient(120% 120% at 20% 0,#151a22,#0d1015);padding:16px;min-height:360px;
+    background-image:radial-gradient(120% 120% at 20% 0,#151a22,#0d1015),linear-gradient(rgba(255,255,255,.02) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.02) 1px,transparent 1px);background-size:auto,26px 26px,26px 26px}
+  .desknote{position:absolute;left:16px;top:14px;font-family:var(--mono);font-size:10px;color:#4a5361;letter-spacing:.05em}
+  .tws{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:22px}
+  @media(max-width:760px){.tws{grid-template-columns:1fr}}
+  .tw{background:var(--scr);border:1px solid #232a34;border-radius:11px;overflow:hidden;box-shadow:0 12px 30px rgba(0,0,0,.35)}
+  .tw .twh{display:flex;align-items:center;gap:7px;padding:7px 11px;background:#141a22;border-bottom:1px solid #212834}
+  .tw .twh i{width:7px;height:7px;border-radius:50%;background:var(--sdim);transition:.3s}
+  .tw.run .twh i{background:var(--scy);box-shadow:0 0 7px var(--scy)}
+  .tw.done .twh i{background:var(--sgrn);box-shadow:0 0 7px var(--sgrn)}
+  .tw.breach .twh i{background:var(--sred);box-shadow:0 0 7px var(--sred)}
+  .tw .twh .n{font-family:var(--mono);font-size:10px;color:#9fb0c4}
+  .tw .twh .tag{margin-left:auto;font-family:var(--mono);font-size:8.5px;color:var(--sdim);border:1px solid #262d38;border-radius:5px;padding:2px 6px}
+  .tw .b{padding:10px 12px;height:150px;overflow:hidden;font-family:var(--mono);font-size:10.5px;line-height:1.65;color:var(--sink)}
+  .tw .b .ln{opacity:0;transform:translateY(3px);animation:ln .2s ease forwards;white-space:pre-wrap;word-break:break-word}
+  @keyframes ln{to{opacity:1;transform:none}}
+  .b .d{color:var(--sdim)}.b .c{color:var(--scy)}.b .r{color:var(--sred)}.b .g{color:var(--sgrn)}.b .a{color:var(--samb)}
+
+  /* nested untrusted-process frame + isolation widget */
+  .nested{margin-top:12px;border:1px dashed #33404f;border-radius:11px;padding:9px 11px;display:flex;align-items:center;gap:10px}
+  .nested .lab{font-family:var(--mono);font-size:10px;color:#8895a6}.nested .lab b{color:#ffb59a}
+  .nested .bar{margin-left:auto;display:flex;gap:14px;font-family:var(--mono);font-size:10px;color:#8895a6}
+  .nested .bar b{color:#cdd6e2}
+  /* desktop toast */
+  .toast{position:absolute;right:16px;bottom:16px;max-width:280px;background:#12171f;border:1px solid #26303c;border-radius:12px;box-shadow:0 16px 40px rgba(0,0,0,.45);padding:12px 14px;
+    transform:translateY(14px);opacity:0;transition:.3s cubic-bezier(.2,.7,.2,1);z-index:8}
+  .toast.show{transform:none;opacity:1}
+  .toast .th{display:flex;align-items:center;gap:9px;font-family:var(--disp);font-weight:700;font-size:12.5px;color:#eaeef4}
+  .toast .th .dot{width:9px;height:9px;border-radius:50%;flex:none}
+  .toast.red .th .dot{background:var(--sred)}.toast.green .th .dot{background:var(--sgrn)}
+  .toast .ts{font-family:var(--mono);font-size:10px;color:#8895a6;margin-top:5px;line-height:1.5}
+
+  /* result strip */
+  .result{display:grid;grid-template-columns:repeat(4,1fr);gap:0;background:var(--ink);border-radius:16px;overflow:hidden;margin-top:14px}
+  @media(max-width:680px){.result{grid-template-columns:1fr 1fr}}
+  .result .m{padding:18px 18px;border-right:1px solid rgba(255,255,255,.08)}
+  .result .m .mv{font-family:var(--disp);font-weight:800;font-size:26px;color:#fff;font-variant-numeric:tabular-nums}
+  .result .m .mv em{font-style:normal;color:var(--lime)}
+  .result .m .mk{font-family:var(--mono);font-size:9.5px;letter-spacing:.07em;text-transform:uppercase;color:rgba(255,255,255,.55);margin-top:5px}
+
+  footer{padding:26px 0 40px;color:var(--ink-3);font-family:var(--mono);font-size:11px;text-align:center;line-height:1.9}
+  footer b{color:var(--ink-2);font-weight:400}
+  @media(prefers-reduced-motion:reduce){*{animation-duration:.001s!important;transition-duration:.1s!important}}
+</style>
+</head>
+<body>
+<nav class="nav"><div class="wrap"><div class="in">
+  <div class="brand"><span class="mk"><svg viewBox="0 0 24 24" width="15" height="15" fill="none"><path d="M5 12l4 4 10-11" stroke="#c8f23a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span class="nm">Cerberus</span></div>
+  <div class="repochip"><span class="g">github.com/</span><input id="repo" value="Preet37/seeded_flask" spellcheck="false" aria-label="Repository"></div>
+  <button class="btn" id="run"><span class="tri"></span><span id="rl">Run scan</span></button>
+</div></div></nav>
+
+<div class="wrap">
+  <header class="hero">
+    <span class="eyebrow">The disposable machine · live</span>
+    <h1>A whole computer, <em>thrown away.</em></h1>
+    <p>Cerberus boots a real disposable VM on Vultr, runs the repository's untrusted code on it, and turns its agents loose — find, prove, patch, re-prove. When it's done the machine is destroyed, and nothing was ever able to leave it.</p>
+  </header>
+
+  <div class="pipe" id="pipe"></div>
+
+  <div class="vmwin" id="vmwin">
+    <div class="vmbar"><span class="lights"><i class="r"></i><i class="y"></i><i class="g"></i></span>
+      <span class="ttl">disposable-vm · <b id="vmhost">sbx-a1f4</b> · vx1-g-2c-8g · ord</span>
+      <span class="kill" id="kill">destroyed on finish</span></div>
+    <div class="vmmenu">
+      <span class="pill iso"><i></i> gVisor runsc</span>
+      <span>uptime <b id="uptime">00:00</b></span>
+      <span class="pill"><i></i> egress <b id="egress" style="color:var(--green)">denied</b></span>
+      <span class="pill">0 open ports</span>
+      <span class="sp"></span>
+      <span>blast radius <b id="blast">0 bytes</b></span>
+    </div>
+    <div class="screen" id="screen">
+      <div class="desknote">disposable VM · runs inside gVisor on the Vultr sandbox host · no path to the control plane</div>
+      <div class="tws">
+        <div class="tw" id="tw_a"><div class="twh"><i></i><span class="n">exploit · prove</span><span class="tag">canary oracle</span></div><div class="b" id="b_a"></div></div>
+        <div class="tw" id="tw_b"><div class="twh"><i></i><span class="n">patch · re-prove</span><span class="tag">2nd model review</span></div><div class="b" id="b_b"></div></div>
+      </div>
+      <div class="nested"><span class="lab">↳ nested: <b id="nestrepo">Preet37/seeded_flask</b> · the repo's own code runs one level deeper, untrusted</span>
+        <span class="bar"><span>found <b id="n-found">0</b></span><span>fixed <b id="n-fixed">0</b></span><span>host DROP <b id="n-drop">+0</b></span></span></div>
+      <div class="toast" id="toast"><div class="th"><span class="dot"></span><span id="toast-h">—</span></div><div class="ts" id="toast-s"></div></div>
+    </div>
+  </div>
+
+  <div class="result">
+    <div class="m"><div class="mv" id="r-conf">0</div><div class="mk">confirmed with a canary</div></div>
+    <div class="m"><div class="mv" id="r-cert">0/5</div><div class="mk">certified closed</div></div>
+    <div class="m"><div class="mv"><em id="r-blast">0</em> bytes</div><div class="mk">left the machine</div></div>
+    <div class="m"><div class="mv"><em id="r-tear">live</em></div><div class="mk">machine after teardown</div></div>
+  </div>
+
+  <footer>disposable <b>vx1-g-2c-8g-120s</b> at <b>$0.076/hr</b> · destroyed on completion · untrusted code never touches the control plane · <a href="https://github.com/Preet37/VultrHack" style="color:var(--ink-2)">source</a></footer>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var reduced=matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var el=function(id){return document.getElementById(id)};
+  var sleep=function(ms){return new Promise(function(r){setTimeout(r,reduced?0:ms)})};
+
+  var STAGES=[["Boot","disposable VM"],["Recon","map the repo"],["Prove","canary in a box"],["Patch","fix a copy"],["Certify","2nd model"],["Destroy","404"]];
+  var pipe=el("pipe");
+  STAGES.forEach(function(s,i){var n=document.createElement("div");n.className="pnode";n.id="pn"+i;
+    n.innerHTML=(i>0?'<div class="conn"><i></i></div>':'')+'<div class="sq">'+String(i+1).padStart(2,"0")+'</div><div class="pt">'+s[0]+'</div><div class="pd">'+s[1]+'</div>';pipe.appendChild(n);});
+  function stage(i){for(var k=0;k<STAGES.length;k++){el("pn"+k).className="pnode"+(k<i?" done fill":k===i?" active fill":"");}}
+
+  function tl(box,cls,txt){var b=el("b_"+box);var d=document.createElement("div");d.className="ln "+(cls||"");d.textContent=(cls==="c"?"› ":"")+txt;
+    b.appendChild(d);while(b.children.length>8)b.removeChild(b.firstChild);}
+  function tw(box,st){el("tw_"+box).className="tw "+(st||"")}
+  function toast(kind,h,s){var t=el("toast");t.className="toast show "+kind;el("toast-h").textContent=h;el("toast-s").textContent=s;}
+  function toastHide(){el("toast").className="toast"}
+
+  var VULNS=[
+    {f:"sql injection",box:"a",can:"CANARY-a1b2c3d4…",fix:"parameterized query"},
+    {f:"path traversal",box:"b",can:"FILECANARY-9f8e7d6c…",fix:"reject '..' · resolve in base"},
+    {f:"command injection",box:"a",can:"FILECANARY-9f8e7d6c…",fix:"argv list · shell off"},
+    {f:"ssrf",box:"b",can:"SSRFCANARY-0f1e2d3c…",fix:"block private/loopback",breach:true},
+    {f:"auth bypass / idor",box:"a",can:"ACCTCANARY-1a2b3c4d…",fix:"enforce object owner"}
+  ];
+
+  var running=false,upt=0,uptId=null;
+  function startUptime(){upt=0;uptId=setInterval(function(){upt++;var m=String((upt/60)|0).padStart(2,"0"),s=String(upt%60).padStart(2,"0");el("uptime").textContent=m+":"+s;},1000);}
+  function stopUptime(){if(uptId)clearInterval(uptId);}
+
+  async function run(){
+    if(running)return;running=true;el("run").disabled=true;el("rl").textContent="Running…";
+    el("b_a").innerHTML="";el("b_b").innerHTML="";tw("a","");tw("b","");toastHide();
+    el("vmwin").classList.remove("off");el("egress").textContent="denied";el("egress").style.color="var(--green)";
+    ["r-conf","n-found","n-fixed"].forEach(function(i){el(i).textContent="0"});el("r-cert").textContent="0/5";el("r-blast").textContent="0";el("n-drop").textContent="+0";el("r-tear").textContent="live";el("blast").textContent="0 bytes";
+    var repo=el("repo").value||"Preet37/seeded_flask";el("nestrepo").textContent=repo;
+    startUptime();
+
+    stage(0);tw("a","run");tw("b","run");
+    tl("a","c","boot disposable VM · gVisor default runtime");
+    tl("a","g","✓ own kernel · /dev/kvm · 4.19.0-gvisor");await sleep(700);
+    stage(1);tl("a","d","recon: 7 routes · 5 inputs · triage on Vultr → 5 ranked");await sleep(650);
+
+    stage(2);var found=0,fixed=0,drop=0;
+    for(var i=0;i<VULNS.length;i++){var v=VULNS[i];
+      tw(v.box,"run");
+      tl(v.box,"r","● "+v.f);
+      if(v.breach){
+        tl(v.box,"r","outbound → blocked internal address · egress DROP");
+        tw(v.box,"breach");el("egress").textContent="DROP";el("egress").style.color="var(--red)";
+        drop+=2;el("n-drop").textContent="+"+drop;
+        toast("red","Egress blocked","the repo's code reached for an internal address — stopped at the host, nothing left the machine");
+        await sleep(1200);toast("green","Contained","blast radius 0 · request never left the VM");await sleep(700);
+        toastHide();tw(v.box,"run");el("egress").textContent="denied";el("egress").style.color="var(--green)";
+      }
+      tl(v.box,"c","canary "+v.can+" observed → confirmed");
+      found++;el("r-conf").textContent=found;el("n-found").textContent=found;
+      await sleep(220);
+      stage(3);tl(v.box,"a","patch → "+v.fix+" · re-exploit blocked");
+      stage(4);tl(v.box,"g","2nd model (independent): closed, no over-block ✓ certified");
+      fixed++;el("r-cert").textContent=fixed+"/5";el("n-fixed").textContent=fixed;
+      tw(v.box,"run");await sleep(160);
+    }
+    tl("a","g","3 certified · sealing receipt");tl("b","g","2 certified · sealing receipt");
+    tw("a","done");tw("b","done");await sleep(500);
+
+    stage(5);stopUptime();
+    el("vmwin").classList.add("off");el("kill").textContent="destroyed";
+    el("r-tear").textContent="404";el("r-blast").textContent="0";
+    el("run").disabled=false;el("rl").textContent="Run again";running=false;
+  }
+  el("run").addEventListener("click",run);
+
+  var played=false;
+  new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting&&!played){played=true;setTimeout(run,400);}});},{threshold:.3}).observe(el("vmwin"));
+})();
+</script>
+</body>
+</html>
