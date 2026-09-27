@@ -35,7 +35,7 @@ from finder.canary import excerpt, first_match
 from finder.models import Finding
 from finder.patchers import _find_function, patch_source
 from finder.playbooks import confirmer_for
-from finder.recon import load_manifest
+from finder.recon import canaries_for, load_manifest
 
 _BENIGN = {"sqli": "1", "path_traversal": "readme.txt"}
 
@@ -73,14 +73,7 @@ class RemediationResult:
         return data
 
 
-def _canaries(manifest: dict | None) -> list[str]:
-    if not manifest:
-        return ["CANARY-a1b2c3d4e5f60718-DO-NOT-EXFIL"]
-    out = [manifest[key] for key in ("canary", "file_canary") if manifest.get(key)]
-    return out or ["CANARY-a1b2c3d4e5f60718-DO-NOT-EXFIL"]
-
-
-def _free_port() -> int:
+def free_port() -> int:
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
@@ -127,6 +120,10 @@ def _reexploit(finding: Finding, base: str, canaries: list[str], timeout: float)
     if confirmer is None:
         return False, "no confirmer for class; cannot prove closure"
     result = confirmer(base, finding.endpoint, finding.param, timeout)
+    if not result.attempts:
+        # Nothing actually landed (e.g. transport errors) -- we cannot claim the
+        # exploit was re-tested, so we must not report it blocked.
+        return False, "no exploit payloads landed against the patched app; closure not proven"
     for _, text in result.attempts:
         leaked = first_match(canaries, text)
         if leaked:
@@ -170,9 +167,18 @@ def _validate(finding: Finding, sink_symbol: str, new_source: str) -> tuple[bool
                 return False, "string-concatenated SQL still present"
         return True, "no concatenated SQL remains; query is parameterized"
     if finding.vuln_class == "path_traversal":
-        seg = ast.get_source_segment(new_source, fn) or ""
-        if ".." in seg and "return" in seg:
-            return True, "guard rejecting '..' is present before the file sink"
+        # Look for a real guard: an `if` whose test rejects traversal ('..' or
+        # an absolute-path check) and that returns/raises out. Substring-matching
+        # the function text would be fooled by the planted-bug comment, so we
+        # inspect the guard's condition structurally.
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.If):
+                continue
+            test_seg = ast.get_source_segment(new_source, node.test) or ""
+            rejects = ".." in test_seg or "is_absolute" in test_seg
+            exits = any(isinstance(b, (ast.Return, ast.Raise)) for b in ast.walk(node))
+            if rejects and exits:
+                return True, "guard rejecting '..'/absolute paths is present before the file sink"
         return False, "no path-traversal guard found"
     return True, "no static validator for this class yet"
 
@@ -209,7 +215,7 @@ def remediate(finding: Finding, source_dir: str, *, timeout: float = 12.0) -> Re
         param=finding.param,
     )
     manifest = load_manifest(source_dir)
-    canaries = _canaries(manifest)
+    canaries = canaries_for(manifest)
     entrypoint = (manifest or {}).get("entrypoint", "app.py")
 
     sink_symbol = _sink_symbol(finding)
@@ -247,7 +253,7 @@ def remediate(finding: Finding, source_dir: str, *, timeout: float = 12.0) -> Re
             ignore=shutil.ignore_patterns("__pycache__", "*.db", "docs", "app_secret.txt", ".pytest_cache", "tests"),
         )
         (dst / finding.sink_file).write_text(patch.new_source)
-        port = _free_port()
+        port = free_port()
         proc = _start_target(dst, entrypoint, port)
         try:
             base = f"http://127.0.0.1:{port}"

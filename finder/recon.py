@@ -20,6 +20,15 @@ import httpx
 from finder.models import Route
 
 _HREF = re.compile(r'href=["\']([^"\']+)["\']', re.IGNORECASE)
+_DEFAULT_CANARY = "CANARY-a1b2c3d4e5f60718-DO-NOT-EXFIL"
+
+
+def canaries_for(manifest: dict | None) -> list[str]:
+    """All planted canaries whose appearance outside the box proves an exploit."""
+    if not manifest:
+        return [_DEFAULT_CANARY]
+    out = [manifest[key] for key in ("canary", "file_canary") if manifest.get(key)]
+    return out or [_DEFAULT_CANARY]
 
 
 def load_manifest(source_dir: str | None) -> dict | None:

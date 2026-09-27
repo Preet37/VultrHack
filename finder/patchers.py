@@ -2,10 +2,15 @@
 
 Given a confirmed finding and the vulnerable source file, produce a fixed
 version of that file, following the remediation named in the class playbook.
-These deterministic patchers cover the confirmable classes on the seeded
-targets; a model-driven patcher for arbitrary code plugs into the same
-`Patch` interface. Either way the re-exploit stage is the judge -- a patch is
-never trusted just because it was produced.
+
+Scope today: these are deterministic AST-guided patchers for Python sources
+matching a recognized vulnerable shape (the seeded targets and code like them);
+the inserted path-traversal guard assumes `pathlib.Path` and a Flask-style
+`Response` are in scope. A model-driven patcher for arbitrary code and other
+frameworks plugs into the same `Patch` interface -- when the shape is not
+recognized, `patch_source` returns None so the caller falls back to that path
+rather than emitting a wrong patch. Either way the re-exploit stage is the
+judge: a patch is never trusted just because it was produced.
 """
 
 from __future__ import annotations
@@ -92,15 +97,22 @@ def _patch_path_traversal(src: str, fn: ast.AST) -> Patch | None:
         return None
     line = src.splitlines()[assign_node.lineno - 1]
     indent = " " * (len(line) - len(line.lstrip()))
+    # Reject parent-directory ('..') COMPONENTS and absolute paths -- this blocks
+    # the traversal escape while still allowing legitimate nested names like
+    # "sub/readme.txt", rather than banning every separator.
     guard = (
         f"{assign_seg}\n"
-        f'{indent}if "/" in {var} or "\\\\" in {var} or ".." in {var}:\n'
+        f'{indent}if ".." in Path({var}).parts or Path({var}).is_absolute():\n'
         f'{indent}    return Response("not found", status=404, mimetype="text/plain")'
     )
     new_src = src.replace(assign_seg, guard, 1)
     if new_src == src:
         return None
-    return Patch("path_traversal", "Reject path separators and '..' before the filename reaches the open() sink.", new_src)
+    return Patch(
+        "path_traversal",
+        "Reject parent-directory ('..') components and absolute paths before the filename reaches the file sink.",
+        new_src,
+    )
 
 
 _PATCHERS = {"sqli": _patch_sqli, "path_traversal": _patch_path_traversal}

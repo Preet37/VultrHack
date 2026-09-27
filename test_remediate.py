@@ -9,7 +9,6 @@ copy and re-exploits it.
 from __future__ import annotations
 
 import importlib.util
-import socket
 import sys
 import threading
 import time
@@ -23,9 +22,19 @@ SEEDED = ROOT / "targets" / "seeded_flask" / "app.py"
 
 pytest.importorskip("flask", reason="target app needs Flask installed")
 
+from finder.models import Finding  # noqa: E402
 from finder.patchers import patch_source  # noqa: E402
 from finder.pipeline import run_finder  # noqa: E402
-from finder.remediate import remediate  # noqa: E402
+from finder.remediate import _validate, free_port, remediate  # noqa: E402
+
+
+def _pt_finding() -> Finding:
+    return Finding(
+        id="pt", vuln_class="path_traversal", endpoint="/download", param="file",
+        input_to_sink="args:file -> download() in app.py:1", sink_file="app.py", sink_line=1,
+        exploit_request="GET x", confirming_output="", canary_observed=True, canary_value="",
+        fix="", confirmer="", triage_source="",
+    )
 
 
 def _load_seeded_app():
@@ -34,14 +43,6 @@ def _load_seeded_app():
     sys.modules["seeded_app_r"] = module
     spec.loader.exec_module(module)
     return module
-
-
-def _free_port() -> int:
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
 
 
 class _QuietHandler(WSGIRequestHandler):
@@ -53,7 +54,7 @@ class _QuietHandler(WSGIRequestHandler):
 def findings():
     module = _load_seeded_app()
     app = module.create_app()
-    port = _free_port()
+    port = free_port()
     server = make_server("127.0.0.1", port, app, handler_class=_QuietHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     import httpx
@@ -119,3 +120,21 @@ def test_no_patch_when_shape_unrecognized():
         '    return conn.execute("SELECT id FROM products WHERE id = ?", (product_id,)).fetchall()\n'
     )
     assert patch_source("sqli", "product", src) is None
+
+
+def test_validator_is_not_fooled_by_unpatched_source():
+    # The unpatched download() has '..' only in a comment; validation must return
+    # False, or certification would be vacuous for path traversal.
+    ok, _ = _validate(_pt_finding(), "download", SEEDED.read_text())
+    assert ok is False
+
+
+def test_path_patch_does_not_over_block_nested_paths():
+    # The guard must reject '..'/absolute paths structurally, not ban every '/'.
+    patch = patch_source("path_traversal", "download", SEEDED.read_text())
+    assert patch is not None
+    assert "is_absolute" in patch.new_source
+    assert '"/" in' not in patch.new_source
+    # And it must actually validate as a real guard.
+    ok, _ = _validate(_pt_finding(), "download", patch.new_source)
+    assert ok is True
