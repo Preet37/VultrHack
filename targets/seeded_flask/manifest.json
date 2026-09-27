@@ -8,11 +8,18 @@
   "canary_env": "CERBERUS_CANARY",
   "file_canary": "FILECANARY-9f8e7d6c5b4a-DO-NOT-READ",
   "file_canary_env": "CERBERUS_FILE_CANARY",
+  "acct_canary": "ACCTCANARY-1a2b3c4d5e6f-DO-NOT-SHARE",
+  "acct_canary_env": "CERBERUS_ACCT_CANARY",
+  "ssrf_canary": "SSRFCANARY-0f1e2d3c4b5a-INTERNAL-ONLY",
+  "ssrf_canary_env": "CERBERUS_SSRF_CANARY",
   "routes": [
     {"method": "GET", "path": "/", "inputs": []},
     {"method": "GET", "path": "/health", "inputs": []},
     {"method": "GET", "path": "/product", "inputs": [{"name": "id", "source": "query"}]},
-    {"method": "GET", "path": "/download", "inputs": [{"name": "file", "source": "query"}]}
+    {"method": "GET", "path": "/download", "inputs": [{"name": "file", "source": "query"}]},
+    {"method": "GET", "path": "/net", "inputs": [{"name": "host", "source": "query"}]},
+    {"method": "GET", "path": "/fetch", "inputs": [{"name": "url", "source": "query"}]},
+    {"method": "GET", "path": "/account", "inputs": [{"name": "id", "source": "query"}]}
   ],
   "planted_bugs": [
     {
@@ -38,6 +45,42 @@
       "sink_pattern": "unsanitized path join passed to open()/read_bytes()",
       "canary_path": "filesystem escape via ../",
       "fix": "Reject path separators, resolve the path, and confirm it stays within the docs base directory."
+    },
+    {
+      "id": "command-injection-net-host",
+      "class": "command_injection",
+      "endpoint": "/net",
+      "param": "host",
+      "input_source": "query",
+      "sink_file": "app.py",
+      "sink_symbol": "net",
+      "sink_pattern": "user input concatenated into a shell=True subprocess.run",
+      "canary_path": "app_secret.txt read via '; cat app_secret.txt'",
+      "fix": "Use an argument list with shell=False; never interpolate input into a shell string."
+    },
+    {
+      "id": "ssrf-fetch-url",
+      "class": "ssrf",
+      "endpoint": "/fetch",
+      "param": "url",
+      "input_source": "query",
+      "sink_file": "app.py",
+      "sink_symbol": "fetch",
+      "sink_pattern": "attacker-controlled URL passed to urllib.request.urlopen",
+      "canary_path": "internal-only /internal/metadata endpoint",
+      "fix": "Allowlist the scheme (http/https) and host; block loopback and private ranges."
+    },
+    {
+      "id": "auth-bypass-account-id",
+      "class": "auth_bypass",
+      "endpoint": "/account",
+      "param": "id",
+      "input_source": "query",
+      "sink_file": "app.py",
+      "sink_symbol": "account",
+      "sink_pattern": "object fetched by client-supplied id with no ownership check",
+      "canary_path": "accounts.secret of another user",
+      "fix": "Enforce that the logged-in user owns the requested account before returning it."
     }
   ]
 }

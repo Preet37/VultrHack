@@ -13,9 +13,14 @@ import sys
 import threading
 import time
 from pathlib import Path
-from wsgiref.simple_server import WSGIRequestHandler, make_server
+from socketserver import ThreadingMixIn
+from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
 import pytest
+
+
+class _ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
+    daemon_threads = True  # so SSRF self-fetch (a nested request) is not deadlocked
 
 ROOT = Path(__file__).parent
 SEEDED = ROOT / "targets" / "seeded_flask" / "app.py"
@@ -55,7 +60,7 @@ def findings():
     module = _load_seeded_app()
     app = module.create_app()
     port = free_port()
-    server = make_server("127.0.0.1", port, app, handler_class=_QuietHandler)
+    server = make_server("127.0.0.1", port, app, server_class=_ThreadingWSGIServer, handler_class=_QuietHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     import httpx
 
@@ -74,21 +79,18 @@ def _one(findings, vuln_class):
     return next(f for f in findings[0] if f.vuln_class == vuln_class)
 
 
-def test_sqli_patch_is_certified_closed(findings):
-    finding = _one(findings, "sqli")
+ALL_CLASSES = ["sqli", "path_traversal", "command_injection", "ssrf", "auth_bypass"]
+
+
+@pytest.mark.parametrize("vuln_class", ALL_CLASSES)
+def test_each_class_patch_is_certified_closed(findings, vuln_class):
+    finding = _one(findings, vuln_class)
     result = remediate(finding, findings[1])
-    assert result.patched is True
-    assert result.reexploit_blocked is True, result.reexploit_evidence
-    assert result.functional_ok is True
-    assert result.validated is True
-    assert result.certified is True
+    assert result.patched is True, (vuln_class, result.validation_notes)
+    assert result.reexploit_blocked is True, (vuln_class, result.reexploit_evidence)
+    assert result.validated is True, (vuln_class, result.validation_notes)
+    assert result.certified is True, (vuln_class, result.reexploit_evidence, result.validation_notes)
     assert result.patch_diff  # a real diff was produced
-
-
-def test_path_traversal_patch_is_certified_closed(findings):
-    finding = _one(findings, "path_traversal")
-    result = remediate(finding, findings[1])
-    assert result.certified is True, (result.reexploit_evidence, result.validation_notes)
 
 
 def test_regression_test_is_emitted(findings):

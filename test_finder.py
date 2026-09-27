@@ -18,9 +18,14 @@ import sys
 import threading
 import time
 from pathlib import Path
-from wsgiref.simple_server import WSGIRequestHandler, make_server
+from socketserver import ThreadingMixIn
+from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
 import pytest
+
+
+class _ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
+    daemon_threads = True  # so SSRF self-fetch (a nested request) is not deadlocked
 
 ROOT = Path(__file__).parent
 SEEDED = ROOT / "targets" / "seeded_flask" / "app.py"
@@ -56,7 +61,7 @@ def target():
     module = _load_seeded_app()
     app = module.create_app()
     port = _free_port()
-    server = make_server("127.0.0.1", port, app, handler_class=_QuietHandler)
+    server = make_server("127.0.0.1", port, app, server_class=_ThreadingWSGIServer, handler_class=_QuietHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     # wait for readiness
@@ -90,6 +95,15 @@ def test_seeded_path_traversal_confirmed(target):
     assert pt, f"expected a confirmed path traversal; got {[f.vuln_class for f in report.findings]}"
     assert pt[0].canary_observed is True
     assert pt[0].endpoint == "/download"
+
+
+def test_all_supported_classes_confirmed(target):
+    base_url, source = target
+    report = run_finder(base_url, source, wall_clock_seconds=60)
+    classes = {f.vuln_class for f in report.findings}
+    expected = {"sqli", "path_traversal", "command_injection", "ssrf", "auth_bypass"}
+    assert expected <= classes, f"missing {expected - classes}; got {classes}"
+    assert all(f.canary_observed for f in report.findings)
 
 
 def test_finding_carries_full_proof(target):

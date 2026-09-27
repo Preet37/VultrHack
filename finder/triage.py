@@ -91,7 +91,7 @@ def _endpoint_param(candidate: Candidate, routes: list[dict]) -> tuple[str, str]
 
 def _offline_plan(candidates: list[Candidate], routes: list[dict]) -> list[TestPlanItem]:
     """Deterministic fallback: rank confirmable classes highest."""
-    confirmable = {"sqli": 9, "path_traversal": 8, "command_injection": 7, "ssrf": 7, "auth_bypass": 6}
+    confirmable = {"sqli": 9, "path_traversal": 8, "command_injection": 8, "ssrf": 7, "auth_bypass": 7}
     plan = []
     for c in candidates:
         endpoint, param = _endpoint_param(c, routes)

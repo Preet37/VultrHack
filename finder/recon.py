@@ -24,10 +24,19 @@ _DEFAULT_CANARY = "CANARY-a1b2c3d4e5f60718-DO-NOT-EXFIL"
 
 
 def canaries_for(manifest: dict | None) -> list[str]:
-    """All planted canaries whose appearance outside the box proves an exploit."""
+    """All planted canaries whose appearance outside the box proves an exploit.
+
+    Any manifest key that names a canary (``canary``, ``file_canary``,
+    ``acct_canary``, ...) contributes its value; the ``*_env`` keys that only
+    name an environment variable are skipped.
+    """
     if not manifest:
         return [_DEFAULT_CANARY]
-    out = [manifest[key] for key in ("canary", "file_canary") if manifest.get(key)]
+    out = [
+        value
+        for key, value in manifest.items()
+        if isinstance(value, str) and "canary" in key and not key.endswith("_env")
+    ]
     return out or [_DEFAULT_CANARY]
 
 

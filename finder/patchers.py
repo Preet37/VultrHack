@@ -16,7 +16,11 @@ judge: a patch is never trusted just because it was produced.
 from __future__ import annotations
 
 import ast
+import re
+import shlex
 from dataclasses import dataclass
+
+from finder.static_sweep import _dotted
 
 
 @dataclass
@@ -31,6 +35,21 @@ def _find_function(tree: ast.AST, name: str) -> ast.AST | None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
             return node
     return None
+
+
+def _assign_by_value(src: str, fn: ast.AST, *needles: str) -> tuple[ast.Assign, str] | None:
+    """First `name = <expr>` in fn whose value source contains all needles -> (node, name)."""
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            seg = ast.get_source_segment(src, node.value) or ""
+            if all(n in seg for n in needles):
+                return node, node.targets[0].id
+    return None
+
+
+def _indent_of(src: str, node: ast.AST) -> str:
+    line = src.splitlines()[node.lineno - 1]
+    return " " * (len(line) - len(line.lstrip()))
 
 
 def _patch_sqli(src: str, fn: ast.AST) -> Patch | None:
@@ -115,7 +134,101 @@ def _patch_path_traversal(src: str, fn: ast.AST) -> Patch | None:
     )
 
 
-_PATCHERS = {"sqli": _patch_sqli, "path_traversal": _patch_path_traversal}
+def _patch_command_injection(src: str, fn: ast.AST) -> Patch | None:
+    """Turn `subprocess.run("cmd " + v, shell=True)` into an argument list, shell off."""
+    for node in ast.walk(fn):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        if node.func.attr not in ("run", "call", "Popen", "check_output", "check_call"):
+            continue
+        if "subprocess" not in _dotted(node.func):
+            continue
+        shell_true = any(
+            kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value is True
+            for kw in node.keywords
+        )
+        if not shell_true or not node.args:
+            continue
+        arg0 = node.args[0]
+        if not (
+            isinstance(arg0, ast.BinOp)
+            and isinstance(arg0.op, ast.Add)
+            and isinstance(arg0.left, ast.Constant)
+            and isinstance(arg0.left.value, str)
+            and isinstance(arg0.right, ast.Name)
+        ):
+            continue
+        arg_seg = ast.get_source_segment(src, arg0)
+        call_seg = ast.get_source_segment(src, node)
+        if not arg_seg or not call_seg:
+            return None
+        argv = "[" + ", ".join([repr(t) for t in shlex.split(arg0.left.value)] + [arg0.right.id]) + "]"
+        new_call = call_seg.replace(arg_seg, argv, 1)
+        new_call = re.sub(r"shell\s*=\s*True\s*,\s*", "", new_call)
+        new_call = re.sub(r",\s*shell\s*=\s*True", "", new_call)
+        new_src = src.replace(call_seg, new_call, 1)
+        if new_src == src:
+            return None
+        return Patch("command_injection", "Pass an argument list with shell disabled instead of building a shell string.", new_src)
+    return None
+
+
+def _patch_ssrf(src: str, fn: ast.AST) -> Patch | None:
+    """Reject non-http(s) schemes and internal hosts before the URL is fetched."""
+    found = _assign_by_value(src, fn, "request.", ".get(")
+    if found is None:
+        return None
+    assign_node, var = found
+    assign_seg = ast.get_source_segment(src, assign_node)
+    if not assign_seg:
+        return None
+    indent = _indent_of(src, assign_node)
+    guard = (
+        f"{assign_seg}\n"
+        f'{indent}if not {var}.lower().startswith(("http://", "https://")) or any(\n'
+        f'{indent}    h in {var} for h in ("127.0.0.1", "localhost", "0.0.0.0", "::1", "169.254.")\n'
+        f"{indent}):\n"
+        f'{indent}    return Response("fetch failed", status=502, mimetype="text/plain")'
+    )
+    new_src = src.replace(assign_seg, guard, 1)
+    if new_src == src:
+        return None
+    return Patch("ssrf", "Allowlist the http(s) scheme and block loopback/link-local hosts before fetching.", new_src)
+
+
+def _patch_auth_bypass(src: str, fn: ast.AST) -> Patch | None:
+    """Insert an ownership check: the requested id must match the caller identity."""
+    user = _assign_by_value(src, fn, "headers", ".get(")
+    obj = _assign_by_value(src, fn, "args", ".get(")
+    if user is None or obj is None:
+        return None
+    user_node, user_var = user
+    obj_node, obj_var = obj
+    if user_var == obj_var:
+        return None
+    anchor = obj_node if obj_node.lineno >= user_node.lineno else user_node
+    anchor_seg = ast.get_source_segment(src, anchor)
+    if not anchor_seg:
+        return None
+    indent = _indent_of(src, anchor)
+    guard = (
+        f"{anchor_seg}\n"
+        f"{indent}if str({obj_var}) != str({user_var}):\n"
+        f'{indent}    return Response("forbidden", status=403, mimetype="text/plain")'
+    )
+    new_src = src.replace(anchor_seg, guard, 1)
+    if new_src == src:
+        return None
+    return Patch("auth_bypass", "Enforce that the caller owns the requested object before returning it.", new_src)
+
+
+_PATCHERS = {
+    "sqli": _patch_sqli,
+    "path_traversal": _patch_path_traversal,
+    "command_injection": _patch_command_injection,
+    "ssrf": _patch_ssrf,
+    "auth_bypass": _patch_auth_bypass,
+}
 
 
 def patch_source(vuln_class: str, sink_symbol: str, src: str) -> Patch | None:

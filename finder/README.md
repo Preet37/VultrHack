@@ -59,10 +59,12 @@ chain (#5). Runs offline — no key, no external tools.
 
 ## Status
 
-- **Working end-to-end today:** recon, AST static sweep, triage (Vultr Inference +
-  offline fallback), HTTP confirmers for **SQLi** and **path traversal**, canary
-  oracle, coverage report, CLI. 5/5 tests green.
-- **Next:** confirmers for command injection / SSRF / auth-bypass; wire in
+- **Working end-to-end today:** recon, AST static sweep (plus an IDOR/auth
+  heuristic), triage (Vultr Inference + offline fallback), HTTP confirmers for
+  **all five classes** — SQLi, path traversal, command injection, SSRF, and
+  auth-bypass/IDOR — canary oracle, coverage report, CLI, and the remediation
+  proof loop that patches each and certifies it closed.
+- **Next:** model-written patches for arbitrary (non-seeded) code shapes; wire in
   sqlmap/nuclei/ZAP as richer confirmers when the sandbox host has them; the
   plant-and-catch safety-net mode; the recall/false-positive benchmark vs Vulnhuntr.
 
