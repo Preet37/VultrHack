@@ -50,6 +50,17 @@ _EXPLAIN = {
 }
 
 
+# What a real client would suffer if this leak happened in production — used in the
+# Results detail view ("what the leak caused").
+_IMPACT = {
+    "sqli": "An attacker can read or dump the entire database — user records, password hashes, secrets — and alter or delete data at will.",
+    "path_traversal": "An attacker can read arbitrary files on the host — config, private keys, /etc/passwd — anything the app process can open.",
+    "command_injection": "An attacker can run arbitrary shell commands on the server — this is full host takeover.",
+    "ssrf": "An attacker can make the server reach internal-only services and cloud metadata endpoints, pivoting into the private network.",
+    "auth_bypass": "An attacker can read or modify other users' records just by changing an id — a full cross-account data breach.",
+}
+
+
 def _explain(vuln_class: str, client: InferenceClient) -> str:
     fallback = _EXPLAIN.get(vuln_class, "The unsafe operation is removed and the fix was re-proven against the original exploit.")
     if not client.available:
@@ -175,11 +186,14 @@ async def _run_real_scan(source_dir: str, emit):
         for f in findings:
             confirmed += 1
             await log("info", f"exploit[{f.vuln_class}]: firing '{f.param}' at {f.endpoint}")
+            await log("info", f"exploit[{f.vuln_class}]: probing {f.endpoint} …")
+            await asyncio.sleep(0.5)
             await emit(type="exploit", cls=f.vuln_class, endpoint=f.endpoint, param=f.param,
-                       canary=f.canary_value, chain=f.input_to_sink,
+                       canary=f.canary_value, chain=f.input_to_sink, impact=_IMPACT.get(f.vuln_class, ""),
                        proof=(f.confirming_output or "")[:360], confirmed=confirmed)
             await log("breach", f"canary {(f.canary_value or '')[:14]} LEFT THE BOX — {f.vuln_class} confirmed at {f.endpoint}")
             await comms("exploit", "contain", f"{f.vuln_class} confirmed at {f.endpoint} — canary left the box, hostile")
+            await asyncio.sleep(0.35)
             if confirmed == 1:
                 await emit(type="toast", icon="alert", title="Breach proven",
                            text=f"planted secret left the box via {f.vuln_class}")
@@ -239,6 +253,7 @@ async def _run_real_scan(source_dir: str, emit):
                 await comms("review", "patch", f"{f.vuln_class} re-exploit blocked — certified closed")
             explanation = await asyncio.to_thread(_explain, f.vuln_class, client)
             await emit(type="explain", cls=f.vuln_class, text=explanation)
+            await asyncio.sleep(0.35)
 
         await comms("contain", "user", f"receipt sealed · {certified}/{confirmed} closed · nothing escaped")
         await log("ok", f"done · {confirmed} found · {certified}/{confirmed} certified closed · nothing escaped")
