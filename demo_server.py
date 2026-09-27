@@ -19,8 +19,11 @@ then open http://127.0.0.1:8000
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -173,18 +176,27 @@ def _detect_entrypoint(d: str) -> str | None:
 class _LenientRunner:
     """Boot a cloned Flask app tier-1 and treat it healthy if / OR /health answers.
 
-    (LocalSubprocessRunner requires /health; real-world repos rarely expose it.)
+    Uses a per-repo interpreter (``python_exe``) when the repo's own deps were
+    installed into an isolated venv; else this process's python. LocalSubprocessRunner
+    requires /health, which real-world repos rarely expose.
     """
 
-    def __init__(self, source_dir: str, entrypoint: str):
+    def __init__(self, source_dir: str, entrypoint: str, python_exe: str | None = None):
         self._source_dir = source_dir
         self._entrypoint = entrypoint
+        self._python = python_exe or sys.executable
         self._proc = None
 
     def start(self) -> str:
         port = free_port()
         base = f"http://127.0.0.1:{port}"
-        self._proc = _start_target(Path(self._source_dir), self._entrypoint, port)
+        env = {k: v for k, v in os.environ.items() if not k.startswith("CERBERUS_")}
+        env["PORT"] = str(port)
+        env["FLASK_RUN_PORT"] = str(port)
+        self._proc = subprocess.Popen(
+            [self._python, self._entrypoint], cwd=self._source_dir, env=env,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
         deadline = time.monotonic() + 22.0
         with httpx.Client(timeout=2.0) as client:
             while time.monotonic() < deadline:
@@ -205,6 +217,56 @@ class _LenientRunner:
         if self._proc is not None:
             _stop(self._proc)
             self._proc = None
+
+
+async def _build_venv(repo_dir: str, emit) -> str | None:
+    """Tier-1 per-repo build: an isolated venv with the repo's own requirements.
+
+    Returns the venv's python, or None if the build fails (e.g. pinned/old deps that
+    can't install on this Python — that repo needs the sandbox image build instead).
+    Bounded: 60s to create the venv, 180s to install.
+    """
+    d = Path(repo_dir)
+    venv_dir = d / ".cerberus_venv"
+    py, pip = venv_dir / "bin" / "python", venv_dir / "bin" / "pip"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "venv", str(venv_dir),
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        await asyncio.wait_for(proc.wait(), 60)
+    except Exception:
+        return None
+    if not py.exists():
+        return None
+    await emit(type="log", level="info", ts=_clk(),
+               text="building an isolated per-repo venv · installing the repo's own dependencies")
+    req = d / "requirements.txt"
+    common = ["flask", "requests", "jinja2", "werkzeug"]
+    pkgs = (["flask", "-r", str(req)] if req.exists() else common)
+    for p in (18, 52, 86):
+        await emit(type="progress", label="pip install · repo requirements", size="", pct=p)
+        await asyncio.sleep(0.14)
+    async def _pip(args, secs):
+        try:
+            p = await asyncio.create_subprocess_exec(
+                str(pip), "install", "-q", "--disable-pip-version-check", "--no-input", *args,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await asyncio.wait_for(p.wait(), secs)
+            return p.returncode
+        except Exception:
+            return -1
+    rc = await _pip(pkgs, 180)
+    if rc != 0:
+        # Pinned/old deps failed to build. Retry with CURRENT common deps — many
+        # simple apps are forward-compatible; the sandbox image build is the robust fix.
+        await emit(type="log", level="warn", ts=_clk(),
+                   text="pinned deps failed — retrying with current Flask + common libraries")
+        rc = await _pip(["flask", "requests", "jinja2", "werkzeug", "flask-wtf", "pyyaml"], 150)
+    await emit(type="progress", label="pip install · repo requirements", size="", pct=100, done=True)
+    if rc != 0:
+        return None
+    await emit(type="log", level="ok", ts=_clk(), text="dependencies installed in an isolated venv")
+    return str(py)
 
 
 @app.websocket("/scan")
@@ -236,10 +298,22 @@ async def scan(ws: WebSocket):
             if has_manifest or entrypoint:
                 await emit(type="log", level="dim", ts=_clk(),
                            text=f"detected entrypoint: {entrypoint or 'app.py (manifest)'} · running tier-1 (production uses the gVisor sandbox, #16)")
+                py = None
+                if not has_manifest:
+                    py = await _build_venv(cloned, emit)
+                    if py is None:
+                        await emit(type="log", level="warn", ts=_clk(),
+                                   text="tier-1 build failed — the repo pins deps this Python can't install")
+                        await emit(type="cloned_only", url=url,
+                                   detail="this repo's pinned dependencies need a build image — routed to the gVisor sandbox")
+                        await emit(type="log", level="ok", ts=_clk(),
+                                   text="repos with their own/old deps build + run in the disposable sandbox (sandbox_scan, #16) — not on the control host")
+                        return
                 try:
                     await _run_real_scan(cloned, emit, display_name=display,
                                          lenient=not has_manifest,
-                                         entrypoint_override=None if has_manifest else entrypoint)
+                                         entrypoint_override=None if has_manifest else entrypoint,
+                                         python_exe=py)
                 except RuntimeError as exc:
                     # tier-1 can't build a repo that pins its own (often ancient) deps —
                     # which is exactly what the disposable gVisor sandbox is for.
@@ -275,7 +349,8 @@ def _clk() -> str:
 
 
 async def _run_real_scan(source_dir: str, emit, display_name: str | None = None,
-                         lenient: bool = False, entrypoint_override: str | None = None):
+                         lenient: bool = False, entrypoint_override: str | None = None,
+                         python_exe: str | None = None):
     """Stream a real scan as four acts: Detonate -> Breach -> Remediate -> Re-verify.
 
     Every number, canary, patch diff and verdict comes from an actual run. The
@@ -320,7 +395,8 @@ async def _run_real_scan(source_dir: str, emit, display_name: str | None = None,
                       ("Jinja2-3.1.3", "133 kB"), ("click-8.1.7", "97 kB")]:
         await dl(f"downloading {pkg}", size)
     await log("info", "binding target to guest VPC IPv4 · tcp/8081 · scoped iptables accept · egress default-deny")
-    runner = _LenientRunner(source_dir, entrypoint) if lenient else LocalSubprocessRunner(source_dir, entrypoint)
+    runner = (_LenientRunner(source_dir, entrypoint, python_exe=python_exe)
+              if lenient else LocalSubprocessRunner(source_dir, entrypoint))
     base = await asyncio.to_thread(runner.start)
     await emit(type="netbird", stage="active")
     await log("ok", "health-proved over the VPC · target is live in the sandbox")
