@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 from botocore.exceptions import ClientError
 
 from diagnostic_receiver import validated_nic_report
+from instance_lifecycle import validated_presigned_source_get
 
 
 def validated_storage_target(endpoint, bucket):
@@ -56,6 +57,16 @@ def presign_nic_post(client, endpoint, bucket, key, expires_in=900):
     ):
         raise ValueError("Presigned NIC upload policy does not restrict its object, size and expiry")
     return form
+
+
+def presign_source_get(client, endpoint, bucket, key, expires_in=900):
+    validated_storage_target(endpoint, bucket)
+    if getattr(client.meta, "endpoint_url", None) != endpoint or not isinstance(key, str) or not re.fullmatch(r"src/[0-9a-f]{32}\.tgz", key):
+        raise ValueError("Presigned source download must target one private object")
+    if type(expires_in) is not int or not 60 <= expires_in <= 900:
+        raise ValueError("Presigned source download expiry must be bounded")
+    url = client.generate_presigned_url("get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=expires_in)
+    return validated_presigned_source_get(url)
 
 
 def read_nic_object(client, bucket, key, vpc_subnet):

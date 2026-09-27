@@ -1,4 +1,6 @@
 import asyncio
+import gzip
+import io
 import ipaddress
 import json
 import logging
@@ -6,6 +8,7 @@ import os
 import re
 import secrets
 import subprocess
+import tarfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -82,7 +85,8 @@ class JobRegistry:
             raise ValueError("Sandbox arm and diagnostic hold must be bounded")
         if self.arm_token and time.monotonic() < self.arm_expires:
             return None
-        if any(job.kind == "sandbox_smoke" and job.status not in TERMINAL for job in self.jobs.values()):
+        # Only one disposable sandbox VX1 may exist at a time, for smoke or scan.
+        if any(job.kind in ("sandbox_smoke", "sandbox_scan") and job.status not in TERMINAL for job in self.jobs.values()):
             return None
         self.arm_token = secrets.token_urlsafe(32)
         self.arm_expires = time.monotonic() + ttl_seconds
@@ -104,12 +108,20 @@ class JobRegistry:
         return hold
 
     def create(self, kind="connectivity", setup_key=None, signals=None, vpc_mode=False, target=None, diagnostic_hold_seconds=None, diagnostic_upload=None):
-        if kind not in ("connectivity", "sandbox_smoke", "scan"):
+        if kind not in ("connectivity", "sandbox_smoke", "scan", "sandbox_scan"):
             raise ValueError("Unsupported job type")
         if kind == "sandbox_smoke":
             if signals is None or (not setup_key and not vpc_mode) or (setup_key and vpc_mode):
                 raise ValueError("Sandbox job requires one private network mode and readiness signals")
-            if any(job.kind == kind and job.status not in TERMINAL for job in self.jobs.values()):
+            if any(job.kind in ("sandbox_smoke", "sandbox_scan") and job.status not in TERMINAL for job in self.jobs.values()):
+                return None
+        if kind == "sandbox_scan":
+            if signals is None or setup_key or diagnostic_hold_seconds is not None or diagnostic_upload is not None:
+                raise ValueError("Sandbox scan requires readiness signals and no smoke options")
+            if target not in SCAN_TARGETS:
+                raise ValueError("Unknown scan target")
+            # One disposable VX1 at a time, shared with sandbox smoke jobs.
+            if any(job.kind in ("sandbox_smoke", "sandbox_scan") and job.status not in TERMINAL for job in self.jobs.values()):
                 return None
         if kind == "scan":
             if target not in SCAN_TARGETS:
@@ -128,6 +140,8 @@ class JobRegistry:
             worker = run_connectivity_job(job)
         elif kind == "scan":
             worker = run_scan_job(job, target)
+        elif kind == "sandbox_scan":
+            worker = run_sandbox_scan_job(job, target, signals)
         elif vpc_mode:
             options = {"diagnostic_hold_seconds": diagnostic_hold_seconds} if diagnostic_hold_seconds is not None else {}
             if diagnostic_upload is not None:
@@ -164,6 +178,60 @@ SCAN_TARGETS = {
     "seeded_flask": Path(__file__).with_name("targets") / "seeded_flask",
     "snipstash": Path(__file__).with_name("targets") / "snipstash",
 }
+
+# Bounds shared with the guest-side extraction guard in instance_lifecycle's
+# target_run user-data: the tarball handed to one presigned GET stays tiny.
+TARGET_SOURCE_MAX_FILES = 128
+TARGET_SOURCE_MAX_BYTES = 8 * 1024 * 1024
+
+
+def deterministic_source_tarball(source_dir, max_files=TARGET_SOURCE_MAX_FILES, max_total_bytes=TARGET_SOURCE_MAX_BYTES):
+    """Pack one seeded scan target into a byte-stable tarball for staging.
+
+    Deterministic so retries stage identical bytes: paths are sorted, volatile
+    __pycache__ artifacts are dropped, and every member gets fixed metadata.
+    Only regular files under the target root are allowed -- no symlinks, no
+    absolute paths, no unbounded names -- because the guest extracts this tar.
+    """
+    root = Path(source_dir)
+    if not root.is_dir():
+        raise ValueError("Scan target source must be a local directory")
+    entries = []
+    total = 0
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if "__pycache__" in relative.parts:
+            continue
+        if path.is_symlink():
+            raise ValueError("Scan target sources must not contain links")
+        if not path.is_file():
+            if path.is_dir():
+                continue
+            raise ValueError("Scan target sources must contain only regular files")
+        name = relative.as_posix()
+        if len(name) > 96 or any(len(part) > 64 for part in relative.parts):
+            raise ValueError("Scan target path is out of bounds")
+        size = path.stat().st_size
+        total += size
+        entries.append((name, path, size))
+        if len(entries) > max_files or total > max_total_bytes:
+            raise ValueError("Scan target source is too large")
+    if not entries:
+        raise ValueError("Scan target source is empty")
+    buffer = io.BytesIO()
+    gzip_file = gzip.GzipFile(filename="", mode="wb", fileobj=buffer, compresslevel=9, mtime=0)
+    with tarfile.open(fileobj=gzip_file, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+        for name, path, size in entries:
+            info = tarfile.TarInfo(name)
+            info.size = size
+            info.mtime = 0
+            info.mode = 0o644
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            with open(path, "rb") as handle:
+                archive.addfile(info, handle)
+    gzip_file.close()
+    return buffer.getvalue()
 
 
 async def run_scan_job(job, target_name):
@@ -375,3 +443,144 @@ async def run_sandbox_smoke_job(job, setup_key, signals, vpc_mode=False, diagnos
     finally:
         if token is not None:
             signals.unregister(token)
+
+
+async def run_sandbox_scan_job(job, target_name, signals):
+    """Scan one seeded target running inside gVisor on a disposable VPC VX1.
+
+    Same lifecycle discipline as the VPC smoke (preflight the approved VPC and
+    control attachment, one bounded VX1, token readiness, unconditional destroy
+    plus an independent 404 check), but the guest bootstrap downloads the
+    deterministically packed target source over a single-object presigned GET,
+    builds a minimal image, and serves it detached with ``--runtime=runsc``
+    published only on the guest's provider-verified VPC IPv4. The finder then
+    scans that private endpoint. The staged source object is always deleted.
+    """
+    import boto3
+    from botocore.config import Config
+
+    from diagnostic_storage import presign_source_get, validated_storage_target
+    from finder.pipeline import run_finder
+    from finder.recon import load_manifest
+    from instance_lifecycle import API_URL, DEFAULT_VX1_PLAN, VultrInstances, temporary_instance, validated_vpc_id, validated_vpc_subnet
+    from sandbox_platform import VPC_INTERNAL_SUBNET
+
+    source_dir = SCAN_TARGETS.get(target_name)
+    instance_id = None
+    token = None
+    failure_stage = None
+    storage = None
+    bucket = None
+    object_key = None
+    object_deleted = False
+    await job.publish("running", "preflight")
+    try:
+        if source_dir is None or not source_dir.is_dir():
+            raise ValueError("Unknown scan target")
+        vpc_id = validated_vpc_id(os.getenv("CERBERUS_VPC_ID"))
+        control_id = validated_vpc_id(os.getenv("CERBERUS_CONTROL_INSTANCE_ID"))
+        subnet = validated_vpc_subnet(os.getenv("CERBERUS_VPC_SUBNET"))
+        control_ip = ipaddress.ip_address(os.getenv("CERBERUS_CONTROL_VPC_IP"))
+        if not isinstance(control_ip, ipaddress.IPv4Address) or control_ip not in subnet or control_ip in (subnet.network_address, subnet.broadcast_address) or subnet.overlaps(ipaddress.ip_network(VPC_INTERNAL_SUBNET)):
+            raise ValueError("Control VPC address or subnet is invalid")
+        storage_endpoint = os.getenv("CERBERUS_S3_ENDPOINT")
+        bucket = os.getenv("CERBERUS_S3_BUCKET")
+        access_key = os.getenv("CERBERUS_S3_ACCESS_KEY")
+        secret_key = os.getenv("CERBERUS_S3_SECRET_KEY")
+        if not all((storage_endpoint, bucket, access_key, secret_key)):
+            raise ValueError("Sandbox scan object storage is not configured")
+        endpoint = storage_endpoint if storage_endpoint.startswith("https://") else f"https://{storage_endpoint}"
+        region_name = validated_storage_target(endpoint, bucket).split(".", 1)[0].removeprefix("https://")
+        storage = boto3.client(
+            "s3", region_name=region_name, endpoint_url=endpoint,
+            aws_access_key_id=access_key, aws_secret_access_key=secret_key,
+            config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}),
+        )
+        payload = deterministic_source_tarball(source_dir)
+        entrypoint = (load_manifest(str(source_dir)) or {}).get("entrypoint", "app.py")
+        api_key, _ = load_keys()
+        token = signals.register()
+        await job.publish("running", "provisioning")
+        async with httpx.AsyncClient(timeout=60, trust_env=False) as client:
+            api = VultrInstances(client, api_key)
+            region = os.getenv("VULTR_REGION", "ord")
+            vpc = await api.get_vpc(vpc_id)
+            if vpc.get("region") != region or validated_vpc_subnet(f"{vpc['v4_subnet']}/{vpc['v4_subnet_mask']}") != subnet:
+                raise ValueError("Configured VPC does not match the approved region and subnet")
+            attached = await api.list_instance_vpcs(control_id)
+            if len(attached) != 1 or attached[0].get("id") != vpc_id or attached[0].get("ip_address") != str(control_ip):
+                raise ValueError("Control VX1 is not attached to the approved VPC address")
+            route = await client.head(f"http://{control_ip}:8001/internal/stage", timeout=5)
+            if route.status_code != 405:
+                raise ValueError("Private VPC callback listener is unavailable")
+            callback = f"http://{control_ip}:8001/internal/ready"
+            object_key = "src/" + secrets.token_hex(16) + ".tgz"
+            await asyncio.to_thread(storage.put_object, Bucket=bucket, Key=object_key, Body=payload)
+            source_url = presign_source_get(storage, endpoint, bucket, object_key, expires_in=900)
+            target_options = {
+                "vpc_callback": True, "vpc_subnet": str(subnet), "vpc_id": vpc_id,
+                "target_run": {"source_url": source_url, "entrypoint": entrypoint},
+            }
+            async with temporary_instance(api, region, os.getenv("VULTR_PLAN", DEFAULT_VX1_PLAN), 2284, callback, token, False, None, False, **target_options) as instance_id:
+                await api.wait_active(instance_id)
+                sandbox_ip = await api.wait_vpc_attachment(instance_id, vpc_id, str(subnet))
+                if sandbox_ip == str(control_ip):
+                    raise ValueError("Disposable and control VX1 cannot share a VPC address")
+                await job.publish("running", "bootstrap")
+                proof = await signals.wait(token, timeout=600)
+                if "failure_stage" in proof:
+                    failure_stage = proof["failure_stage"]
+                    raise RuntimeError("Sandbox bootstrap reported a bounded failure stage")
+                base_url = f"http://{sandbox_ip}:8081"
+                if proof.get("runtime") != "runsc" or proof.get("vpc_ip") != sandbox_ip or proof.get("target") != "healthy" or proof.get("endpoint") != base_url:
+                    raise ValueError("Target readiness proof does not match the provider VPC attachment")
+                await job.publish("running", "scanning")
+                report = await asyncio.to_thread(run_finder, base_url, str(source_dir))
+                await job.publish("running", "teardown")
+            destroyed = await client.get(f"{API_URL}/{instance_id}", headers=api.headers)
+            if destroyed.status_code != 404:
+                raise RuntimeError("Disposable target VX1 was not independently confirmed destroyed")
+            await asyncio.to_thread(storage.delete_object, Bucket=bucket, Key=object_key)
+            object_deleted = True
+        coverage = report.coverage.to_dict()
+        job.result = {
+            "instance_id": instance_id,
+            "vpc_ip": sandbox_ip,
+            "target": target_name,
+            "endpoint": base_url,
+            "endpoint_health": "healthy",
+            "host": {field: proof[field] for field in ("hostname", "uname", "cpu_virt", "kvm_device", "kvm_access")},
+            "triage_source": report.triage_source,
+            "confirmed_findings": len(report.findings),
+            "findings": [finding.to_dict() for finding in report.findings][:32],
+            "coverage": {
+                "classes_tested": coverage["classes_tested"][:8],
+                "endpoints_tested": coverage["endpoints_tested"][:32],
+                "candidates_seen": coverage["candidates_seen"],
+                "candidates_tested": coverage["candidates_tested"],
+                "not_reached": coverage["not_reached"][:8],
+                "steps_used": coverage["steps_used"],
+                "wall_clock_seconds": coverage["wall_clock_seconds"],
+            },
+            "destroyed": True,
+            "source_object_deleted": True,
+        }
+    except Exception as error:
+        last_stage = signals.stage(token) if token is not None else None
+        detail = f"{type(error).__name__}; stage={failure_stage or last_stage or 'none'}"
+        job.error = (
+            f"Sandbox scan failed ({detail}); verify cleanup of instance {instance_id}"
+            if instance_id else f"Sandbox scan failed ({detail}) before an instance ID was confirmed"
+        )
+        logging.getLogger(__name__).warning("Sandbox scan failed: %s", detail)
+        await job.publish("failed", "teardown")
+    else:
+        await job.publish("completed", "complete")
+    finally:
+        if token is not None:
+            signals.unregister(token)
+        if storage is not None and bucket is not None and object_key is not None and not object_deleted:
+            try:
+                await asyncio.to_thread(storage.delete_object, Bucket=bucket, Key=object_key)
+            except Exception:
+                logging.getLogger(__name__).warning("Sandbox scan could not delete its staged source object")

@@ -1,18 +1,20 @@
 import base64
 import io
 import json
+import re
 import subprocess
 import urllib.request
 import zlib
 from datetime import datetime, timezone
+from urllib.parse import parse_qs, urlsplit
 
 import boto3
 import pytest
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-from diagnostic_storage import presign_nic_post, read_nic_object, validated_storage_target
-from instance_lifecycle import docker_user_data, validated_presigned_nic_post
+from diagnostic_storage import presign_nic_post, presign_source_get, read_nic_object, validated_storage_target
+from instance_lifecycle import docker_user_data, validated_presigned_nic_post, validated_presigned_source_get
 
 
 BUCKET = "cerberus-nic-demo"
@@ -111,3 +113,102 @@ def test_private_object_reader_is_bounded_and_distinguishes_missing_objects():
     store.content_type = "text/html"
     with pytest.raises(ValueError):
         read_nic_object(store, BUCKET, KEY, "10.52.0.0/24")
+
+
+# --- Presigned single-object GET for disposable target source handoff ---
+
+SOURCE_BUCKET = "cerberus-target-src"
+SOURCE_KEY = "src/" + "b" * 32 + ".tgz"
+
+
+@pytest.fixture
+def source_client():
+    return boto3.client(
+        "s3", region_name="ord1", endpoint_url="https://ord1.vultrobjects.com",
+        aws_access_key_id="test-access", aws_secret_access_key="test-secret",
+        config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}),
+    )
+
+
+def source_query(expires="900", signature="a" * 64, algorithm="AWS4-HMAC-SHA256"):
+    return (
+        f"X-Amz-Algorithm={algorithm}&X-Amz-Credential=test-access%2F20260927%2Ford1%2Fs3%2Faws4_request"
+        f"&X-Amz-Date=20260927T000000Z&X-Amz-Expires={expires}&X-Amz-SignedHeaders=host&X-Amz-Signature={signature}"
+    )
+
+
+def build_source_url(scheme="https", host=None, path=None, query=None, fragment=""):
+    host = host if host is not None else f"{SOURCE_BUCKET}.ord1.vultrobjects.com"
+    path = f"/{SOURCE_KEY}" if path is None else path
+    query = source_query() if query is None else query
+    url = f"{scheme}://{host}{path}"
+    if query:
+        url += f"?{query}"
+    if fragment:
+        url += f"#{fragment}"
+    return url
+
+
+def test_presigned_source_get_targets_one_private_bounded_object(source_client):
+    url = presign_source_get(source_client, "https://ord1.vultrobjects.com", SOURCE_BUCKET, SOURCE_KEY, expires_in=600)
+    assert validated_presigned_source_get(url) == url
+    parsed = urlsplit(url)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == f"{SOURCE_BUCKET}.ord1.vultrobjects.com"
+    assert parsed.path == f"/{SOURCE_KEY}" and not parsed.fragment
+    params = parse_qs(parsed.query)
+    assert params["X-Amz-Algorithm"] == ["AWS4-HMAC-SHA256"]
+    assert params["X-Amz-Expires"] == ["600"]
+    assert re.fullmatch(r"[0-9a-f]{64}", params["X-Amz-Signature"][0])
+    assert "test-secret" not in url
+
+
+@pytest.mark.parametrize("expires_in", [59, 901, 9000, True, "900", 900.0])
+def test_presigned_source_get_bounds_its_expiry(source_client, expires_in):
+    with pytest.raises(ValueError, match="expiry"):
+        presign_source_get(source_client, "https://ord1.vultrobjects.com", SOURCE_BUCKET, SOURCE_KEY, expires_in=expires_in)
+
+
+@pytest.mark.parametrize("key", [
+    "nic/" + "a" * 32 + ".json",
+    "src/../" + "b" * 32 + ".tgz",
+    "src//" + "b" * 32 + ".tgz",
+    "src/" + "b" * 31 + ".tgz",
+    "src/" + "B" * 32 + ".tgz",
+    "src/" + "b" * 32 + ".tar.gz",
+    "src/" + "b" * 32 + ".tgz ",
+])
+def test_presigned_source_get_rejects_other_or_ambiguous_objects(source_client, key):
+    with pytest.raises(ValueError):
+        presign_source_get(source_client, "https://ord1.vultrobjects.com", SOURCE_BUCKET, key)
+
+
+def test_presigned_source_get_requires_the_validated_client_endpoint_and_bucket(source_client):
+    with pytest.raises(ValueError):
+        presign_source_get(source_client, "https://ewr1.vultrobjects.com", SOURCE_BUCKET, SOURCE_KEY)
+    with pytest.raises(ValueError):
+        presign_source_get(source_client, "https://ord1.vultrobjects.com", "Invalid_Bucket", SOURCE_KEY)
+
+
+@pytest.mark.parametrize("mutations", [
+    {"scheme": "http"},
+    {"host": "ord1.vultrobjects.com"},
+    {"host": f"{SOURCE_BUCKET}.ord1.vultrobjects.com.evil.example"},
+    {"host": f"user@{SOURCE_BUCKET}.ord1.vultrobjects.com"},
+    {"host": f"{SOURCE_BUCKET}.ord1.vultrobjects.com:8443"},
+    {"host": f"{SOURCE_BUCKET.upper()}.ord1.vultrobjects.com"},
+    {"path": "/src/../" + SOURCE_KEY},
+    {"path": "//" + SOURCE_KEY},
+    {"path": f"/{SOURCE_KEY}/"},
+    {"path": f"/{SOURCE_KEY.replace('.tgz', '')}..tgz"},
+    {"query": ""},
+    {"query": "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Expires=900"},
+    {"query": source_query(expires="3600")},
+    {"query": source_query(expires="abc")},
+    {"query": source_query(signature="z" * 64)},
+    {"query": source_query(algorithm="AWS2-HMAC-SHA1")},
+    {"fragment": "frag"},
+])
+def test_validated_presigned_source_get_rejects_foreign_traversal_or_unsigned_urls(mutations):
+    with pytest.raises(ValueError):
+        validated_presigned_source_get(build_source_url(**mutations))
