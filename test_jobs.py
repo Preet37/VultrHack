@@ -1157,7 +1157,7 @@ def test_registry_shares_one_disposable_vx1_between_smoke_and_scan():
 def test_sandbox_scan_route_arms_and_consumes_one_token_like_vpc_smoke(auth, monkeypatch):
     seen = []
 
-    async def fake_scan(job, target, signals, target_runtime="gvisor", remediate=False, repo=None, entrypoint=None):
+    async def fake_scan(job, target, signals, target_runtime="gvisor", remediate=False, repo=None, entrypoint=None, subpath=None):
         seen.append((target, signals, remediate))
         job.result = {"destroyed": True, "vpc_ip": "10.52.0.3"}
         await job.publish("completed")
@@ -1200,7 +1200,7 @@ def test_sandbox_scan_route_arms_and_consumes_one_token_like_vpc_smoke(auth, mon
 def test_enabled_sandbox_scan_needs_no_arm_but_still_requires_approval_and_vpc_config(auth, monkeypatch):
     seen = []
 
-    async def fake_scan(job, target, signals, target_runtime="gvisor", remediate=False, repo=None, entrypoint=None):
+    async def fake_scan(job, target, signals, target_runtime="gvisor", remediate=False, repo=None, entrypoint=None, subpath=None):
         seen.append(target)
         job.result = {"destroyed": True}
         await job.publish("completed")
@@ -1237,7 +1237,7 @@ def test_remediate_is_rejected_for_every_job_type_except_sandbox_scan(auth, monk
 def test_sandbox_scan_repo_route_requires_exactly_one_of_target_or_repo(auth, monkeypatch):
     seen = []
 
-    async def fake_scan(job, target, signals, target_runtime="gvisor", remediate=False, repo=None, entrypoint=None):
+    async def fake_scan(job, target, signals, target_runtime="gvisor", remediate=False, repo=None, entrypoint=None, subpath=None):
         seen.append((target, repo, entrypoint))
         job.result = {"destroyed": True}
         await job.publish("completed")
@@ -1278,10 +1278,28 @@ def test_resolve_scan_source_validation(repo, ok, monkeypatch):
             __import__("jobs").resolve_scan_source(repo)
 
 
+def test_resolve_scan_source_subpath_stays_inside_clone(tmp_path, monkeypatch):
+    def fake_run(cmd, **kwargs):
+        (Path(cmd[-1]) / "targets" / "seeded_flask").mkdir(parents=True)
+        class R:
+            returncode = 0
+        return R()
+    monkeypatch.setattr(jobs.subprocess, "run", fake_run)
+    src, cleanup = jobs.resolve_scan_source("https://github.com/x/y")
+    nested, same_cleanup = jobs._apply_subpath(src, cleanup, "targets/seeded_flask")
+    assert nested.endswith("targets/seeded_flask") and same_cleanup == cleanup
+    shutil.rmtree(cleanup, ignore_errors=True)
+    src, cleanup = jobs.resolve_scan_source("https://github.com/x/y")
+    for bad in ("../outside", "../../etc", "/absolute"):
+        with pytest.raises(ValueError):
+            jobs._apply_subpath(src, cleanup, bad)
+    shutil.rmtree(cleanup, ignore_errors=True)
+
+
 def test_sandbox_scan_remediate_flag_passes_through_to_the_worker(auth, monkeypatch):
     seen = []
 
-    async def fake_scan(job, target, signals, target_runtime="gvisor", remediate=False, repo=None, entrypoint=None):
+    async def fake_scan(job, target, signals, target_runtime="gvisor", remediate=False, repo=None, entrypoint=None, subpath=None):
         seen.append(remediate)
         job.result = {"destroyed": True}
         await job.publish("completed")
