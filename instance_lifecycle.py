@@ -126,7 +126,7 @@ def target_run_user_data(source_url, entrypoint, vpc_subnet):
     port = TARGET_CONTAINER_PORT
     return (
         "cerberus_report_stage target_fetch\n"
-        f"curl -fsS --retry 2 --max-time 90 -o /root/target.tgz {shlex.quote(source_url)}\n"
+        f"curl -fsS --retry 2 --max-time 90 -o /root/target.tgz {shlex.quote(source_url)} || {{ echo 'source-fetch-failed' > /root/cerberus-detail; false; }}\n"
         "python3 -c 'import os; size = os.stat(\"/root/target.tgz\").st_size; assert 0 < size <= 8388608, \"Target source tarball is out of bounds\"'\n"
         "mkdir -p /root/target\n"
         "tar -xzf /root/target.tgz -C /root/target --no-same-owner\n"
@@ -218,7 +218,7 @@ def microsandbox_run_user_data(source_url, entrypoint, vpc_subnet):
         "msb --version\n"
         "if ! msb doctor >/root/cerberus-doctor.log 2>&1; then tail -c 240 /root/cerberus-doctor.log | tr -cd '[:print:] ' > /root/cerberus-detail; false; fi\n"
         "cerberus_report_stage target_fetch\n"
-        f"curl -fsS --retry 2 --max-time 90 -o /root/target.tgz {shlex.quote(source_url)}\n"
+        f"curl -fsS --retry 2 --max-time 90 -o /root/target.tgz {shlex.quote(source_url)} || {{ echo 'source-fetch-failed' > /root/cerberus-detail; false; }}\n"
         "python3 -c 'import os; size = os.stat(\"/root/target.tgz\").st_size; assert 0 < size <= 8388608, \"Target source tarball is out of bounds\"'\n"
         "mkdir -p /root/target\n"
         "tar -xzf /root/target.tgz -C /root/target --no-same-owner\n"
