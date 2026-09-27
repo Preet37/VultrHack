@@ -110,7 +110,7 @@ class JobRegistry:
         self.arm_hold_seconds = 0
         return hold
 
-    def create(self, kind="connectivity", setup_key=None, signals=None, vpc_mode=False, target=None, diagnostic_hold_seconds=None, diagnostic_upload=None, target_runtime="gvisor", remediate=False, repo=None, entrypoint=None):
+    def create(self, kind="connectivity", setup_key=None, signals=None, vpc_mode=False, target=None, diagnostic_hold_seconds=None, diagnostic_upload=None, target_runtime="gvisor", remediate=False, repo=None, entrypoint=None, subpath=None):
         if kind not in ("connectivity", "sandbox_smoke", "scan", "sandbox_scan"):
             raise ValueError("Unsupported job type")
         if remediate and kind != "sandbox_scan":
@@ -127,6 +127,8 @@ class JobRegistry:
                 raise ValueError("Sandbox scan requires readiness signals and no smoke options")
             if (target is None) == (repo is None):
                 raise ValueError("Sandbox scan needs exactly one of target or repo")
+            if subpath is not None and repo is None:
+                raise ValueError("subpath requires a repo")
             if target is not None and target not in SCAN_TARGETS:
                 raise ValueError("Unknown scan target")
             # One disposable VX1 at a time, shared with sandbox smoke jobs.
@@ -150,7 +152,7 @@ class JobRegistry:
         elif kind == "scan":
             worker = run_scan_job(job, target)
         elif kind == "sandbox_scan":
-            worker = run_sandbox_scan_job(job, target, signals, target_runtime=target_runtime, remediate=remediate, repo=repo, entrypoint=entrypoint)
+            worker = run_sandbox_scan_job(job, target, signals, target_runtime=target_runtime, remediate=remediate, repo=repo, entrypoint=entrypoint, subpath=subpath)
         elif vpc_mode:
             options = {"diagnostic_hold_seconds": diagnostic_hold_seconds} if diagnostic_hold_seconds is not None else {}
             if diagnostic_upload is not None:
@@ -458,8 +460,10 @@ async def run_sandbox_smoke_job(job, setup_key, signals, vpc_mode=False, diagnos
             signals.unregister(token)
 
 
-def resolve_scan_source(repo):
-    """Return (source_dir, cleanup) for an arbitrary repo: local absolute dir or https git URL."""
+def resolve_scan_source(repo, subpath=None):
+    """Return (source_dir, cleanup) for an arbitrary repo: local absolute dir or https git URL.
+
+    ``subpath`` selects a single directory inside a cloned repo (no traversal)."""
     if repo is None:
         raise ValueError("Repo source required")
     if not isinstance(repo, str):
@@ -493,7 +497,19 @@ def resolve_scan_source(repo):
     return str(path), None
 
 
-async def run_sandbox_scan_job(job, target_name, signals, target_runtime="gvisor", remediate=False, repo=None, entrypoint=None):
+def _apply_subpath(source_dir, cleanup, subpath):
+    if subpath is None:
+        return source_dir, cleanup
+    parts = Path(subpath).parts
+    if not parts or any(part in (".", "..") for part in parts) or Path(subpath).is_absolute() or any(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", part) is None for part in parts):
+        raise ValueError("Repo subpath must stay inside the clone")
+    resolved = (Path(source_dir) / subpath).resolve()
+    if source_dir not in str(resolved) or not resolved.is_dir():
+        raise ValueError("Repo subpath must name a directory inside the clone")
+    return str(resolved), cleanup
+
+
+async def run_sandbox_scan_job(job, target_name, signals, target_runtime="gvisor", remediate=False, repo=None, entrypoint=None, subpath=None):
     """Scan one seeded target running inside gVisor on a disposable VPC VX1.
 
     Same lifecycle discipline as the VPC smoke (preflight the approved VPC and
@@ -528,6 +544,9 @@ async def run_sandbox_scan_job(job, target_name, signals, target_runtime="gvisor
     if repo is not None:
         resolved, repo_cleanup = resolve_scan_source(repo)
         source_dir = Path(resolved)
+        if subpath is not None:
+            sub_dir, repo_cleanup = _apply_subpath(resolved, repo_cleanup, subpath)
+            source_dir = Path(sub_dir)
     instance_id = None
     token = None
     failure_stage = None
