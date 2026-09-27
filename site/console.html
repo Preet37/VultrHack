@@ -658,7 +658,9 @@
     if(ev.type==="comms"){addComms(ev.frm,ev.to,ev.text);return;}
     if(ev.type==="netbird"){netbird(ev.stage);return;}
     if(ev.type==="gate"){gateEvent(ev);return;}
-    if(ev.type==="cloned_only"){running=false;toast("shield","Repo cloned","untrusted code routed to the gVisor sandbox — not run on the control host");return;}
+    if(ev.type==="cloned_only"){running=false;toast("shield","Cloned → sandbox",ev.detail||"untrusted repo routed to the gVisor sandbox");
+      $("#ctag").textContent="routed to the gVisor sandbox";
+      setTimeout(function(){closeInst();$("#launcher").classList.remove("gone");},2800);return;}
     if(ev.type==="act"){return;}
 
     if(ev.type==="stage"){
