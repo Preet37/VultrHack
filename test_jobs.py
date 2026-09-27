@@ -473,7 +473,15 @@ def test_scan_rejects_sandbox_credentials(auth):
         assert resp.status_code == 400
 
 
-def test_scan_seeded_flask_runs_full_loop(auth):
+def test_scan_jobs_are_disabled_by_default(auth, monkeypatch):
+    monkeypatch.delenv("CERBERUS_ENABLE_LOCAL_SCAN_JOBS", raising=False)
+    with TestClient(app) as client:
+        assert client.post("/jobs", json={"type": "scan", "target": "seeded_flask"}, headers=auth).status_code == 503
+
+
+def test_scan_seeded_flask_runs_full_loop(auth, monkeypatch):
+    pytest.importorskip("flask", reason="seeded target app requires Flask")
+    monkeypatch.setenv("CERBERUS_ENABLE_LOCAL_SCAN_JOBS", "true")
     with TestClient(app) as client:
         start = client.post("/jobs", json={"type": "scan", "target": "seeded_flask"}, headers=auth)
         assert start.status_code == 202

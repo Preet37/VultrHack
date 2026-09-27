@@ -234,6 +234,8 @@ async def start_job(request: JobRequest, authorization: str | None = Header(defa
             raise HTTPException(status_code=400, detail="Scan jobs do not accept sandbox credentials")
         if request.target not in SCAN_TARGETS:
             raise HTTPException(status_code=400, detail="Unknown scan target")
+        if os.getenv("CERBERUS_ENABLE_LOCAL_SCAN_JOBS") != "true":
+            raise HTTPException(status_code=503, detail="Local scan jobs are disabled")
         job = job_registry.create(request.type, target=request.target)
     else:
         if request.approve_vm or request.netbird_setup_key is not None:
