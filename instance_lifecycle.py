@@ -124,6 +124,7 @@ def target_run_user_data(source_url, entrypoint, vpc_subnet):
     network = str(subnet.network_address)
     broadcast = str(subnet.broadcast_address)
     port = TARGET_CONTAINER_PORT
+    probe_module = "uvicorn" if ":" in entrypoint else "flask"
     return (
         "cerberus_report_stage target_fetch\n"
         f"curl -fsS --retry 2 --max-time 90 -o /root/target.tgz {shlex.quote(source_url)} || {{ echo 'source-fetch-failed' > /root/cerberus-detail; false; }}\n"
@@ -159,8 +160,8 @@ def target_run_user_data(source_url, entrypoint, vpc_subnet):
         "    Flask.run = _run\n"
         "PYEOF\n"
         "docker build -t cerberus-target /root/target >/root/cerberus-build.log 2>&1 || { tail -c 240 /root/cerberus-build.log | tr -cd '[:print:] ' > /root/cerberus-detail; false; }\n"
-        "if runsc_out=$(docker run --rm --runtime=runsc --entrypoint python cerberus-target -c 'import flask' 2>&1); then runsc_rc=0; else runsc_rc=$?; fi\n"
-        "if runc_out=$(docker run --rm --runtime=runc --entrypoint python cerberus-target -c 'import flask' 2>&1); then runc_rc=0; else runc_rc=$?; fi\n"
+        f"if runsc_out=$(docker run --rm --runtime=runsc --entrypoint python cerberus-target -c 'import {probe_module}' 2>&1); then runsc_rc=0; else runsc_rc=$?; fi\n"
+        f"if runc_out=$(docker run --rm --runtime=runc --entrypoint python cerberus-target -c 'import {probe_module}' 2>&1); then runc_rc=0; else runc_rc=$?; fi\n"
         "if [ \"$runc_rc\" -ne 0 ]; then\n"
         "    fs_dump=$(docker run --rm --runtime=runc --entrypoint sh cerberus-target -c 'ls /usr/local/lib/python3.12/site-packages | head -8; test -f /app/DEPS_OK && echo MARKER-OK || echo MARKER-MISSING' 2>&1 | tr -cd '[:print:] \\n' | tr '\\n' ' ')\n"
         "    df_lines=$(grep -c '^' /root/target/Dockerfile; grep '^RUN' /root/target/Dockerfile | head -2 | cut -c1-60 | tr '\\n' ';')\n"
