@@ -204,6 +204,10 @@ def _patch_ssrf(src: str, fn: ast.AST) -> Patch | None:
     # Resolve the host to an IP and reject internal ranges. This defeats
     # uppercase hosts, DNS names that resolve inward, and decimal/hex-encoded
     # IPs -- string denylists of "127.0.0.1"/"localhost" do not.
+    # A policy block returns 403 while a DNS/resolve failure returns 502, so a
+    # functional check can tell "the guard rejected a legitimate host" (over-block,
+    # 403) apart from "the fetch just failed" (502) -- otherwise SSRF functional
+    # parity cannot be asserted without live egress.
     guard = (
         f"{assign_seg}\n"
         f"{indent}_parsed = urlparse({var})\n"
@@ -212,7 +216,7 @@ def _patch_ssrf(src: str, fn: ast.AST) -> Patch | None:
         f"{indent}except (OSError, ValueError):\n"
         f'{indent}    return Response("fetch failed", status=502, mimetype="text/plain")\n'
         f'{indent}if _parsed.scheme not in ("http", "https") or _ip.is_private or _ip.is_loopback or _ip.is_link_local or _ip.is_reserved:\n'
-        f'{indent}    return Response("fetch failed", status=502, mimetype="text/plain")'
+        f'{indent}    return Response("blocked by policy", status=403, mimetype="text/plain")'
     )
     new_src = src.replace(assign_seg, guard, 1)
     if new_src == src:

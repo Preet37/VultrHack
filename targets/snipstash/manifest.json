@@ -12,6 +12,7 @@
   "note_canary_env": "CERBERUS_NOTE_CANARY",
   "ssrf_canary": "SSRFCANARY-snip-abcdef-INTERNAL",
   "ssrf_canary_env": "CERBERUS_SSRF_CANARY",
+  "benign": {"path_traversal": "welcome.txt"},
   "routes": [
     {"method": "GET", "path": "/", "inputs": []},
     {"method": "GET", "path": "/health", "inputs": []},
