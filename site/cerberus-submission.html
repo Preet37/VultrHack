@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cerberus | Blast Radius Zero submission</title>
+<style>
+  :root { color-scheme: light; font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #dfe5df; color: #17241d; }
+  button { font: inherit; }
+  .viewport { margin: 0 auto; position: relative; }
+  .deck { width: 1280px; height: 720px; transform-origin: top left; }
+  .slide { position: relative; display: none; width: 1280px; height: 720px; padding: 111px 76px 70px; overflow: hidden; background: #f6f8f3; color: #17241d; --muted: #56665d; --line: #d4ddd5; }
+  .slide.active { display: block; }
+  .slide.dark { background: #0e1b16; color: #f6faf5; --muted: #a1b3a7; --line: #344c3c; }
+  .slide.soft { background: #e9f2e9; }
+  .brand { position: absolute; left: 76px; top: 36px; display: flex; gap: 10px; align-items: center; font-size: 17px; font-weight: 850; letter-spacing: .08em; }
+  .brand-mark { width: 17px; height: 17px; background: #28e873; transform: rotate(-15deg); border-radius: 4px; }
+  .brand small { font-size: 11px; font-weight: 700; letter-spacing: .16em; color: var(--muted); margin-left: 13px; }
+  .eyebrow { margin: 0 0 23px; color: #178944; font-size: 13px; font-weight: 750; letter-spacing: .21em; text-transform: uppercase; }
+  .dark .eyebrow { color: #54f68d; }
+  h1, h2, h3, p { margin: 0; }
+  h1, h2 { letter-spacing: -.05em; }
+  h1 { font-size: 71px; line-height: 1.02; font-weight: 820; }
+  h2 { font-size: 47px; line-height: 1.08; font-weight: 800; max-width: 1050px; }
+  h3 { font-size: 24px; line-height: 1.15; font-weight: 750; letter-spacing: -.025em; }
+  p { font-size: 21px; line-height: 1.43; }
+  .lead { max-width: 850px; margin-top: 24px; color: var(--muted); font-size: 23px; line-height: 1.4; }
+  .muted { color: var(--muted); }
+  .small { font-size: 16px; line-height: 1.45; }
+  .micro { font-size: 13px; line-height: 1.45; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .accent { color: #198f47; }
+  .dark .accent { color: #54f68d; }
+  .divider { height: 1px; background: var(--line); }
+  .foot { position: absolute; left: 76px; right: 76px; bottom: 26px; display: flex; justify-content: space-between; gap: 20px; align-items: flex-end; color: var(--muted); font-size: 12px; letter-spacing: .02em; }
+  .foot span:last-child { white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .intro { display: flex; gap: 26px; align-items: center; }
+  .intro-copy { width: 724px; }
+  .intro-logo { width: 320px; height: 320px; border: 1px solid #284634; background: #17241d; border-radius: 32px; object-fit: contain; }
+  .intro-rule { width: 78px; height: 7px; border-radius: 8px; background: #54f68d; margin: 29px 0; }
+  .subline { font-size: 21px; color: var(--muted); max-width: 650px; }
+  .chips { display: flex; gap: 11px; margin-top: 34px; }
+  .chip { padding: 10px 16px; border: 1px solid var(--line); border-radius: 100px; color: var(--muted); font-size: 13px; font-weight: 700; letter-spacing: .02em; }
+  .chip.filled { border-color: #54f68d; color: #0e1b16; background: #54f68d; }
+  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; margin-top: 49px; }
+  .panel { padding: 30px 32px; border: 1px solid var(--line); border-radius: 18px; background: rgba(255,255,255,.52); }
+  .dark .panel { background: #172920; }
+  .panel p { margin-top: 13px; color: var(--muted); font-size: 19px; }
+  .panel .tag { color: #198f47; font-weight: 800; font-size: 12px; letter-spacing: .18em; text-transform: uppercase; margin-bottom: 13px; }
+  .dark .panel .tag { color: #54f68d; }
+  .statement { margin-top: 33px; font-size: 26px; font-weight: 710; letter-spacing: -.03em; }
+  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px 31px; margin-top: 36px; }
+  .step { min-height: 150px; border-top: 1px solid var(--line); padding-top: 16px; }
+  .step b { display: block; color: #168e46; font: 700 16px ui-monospace, SFMono-Regular, Menlo, monospace; margin-bottom: 13px; }
+  .step strong { font-size: 20px; letter-spacing: -.025em; }
+  .step p { color: var(--muted); font-size: 16px; line-height: 1.38; margin-top: 8px; }
+  .architecture { margin-top: 36px; display: grid; grid-template-columns: 1fr 30px 1.15fr 30px 1.15fr; gap: 12px; align-items: center; }
+  .node { height: 240px; border: 1px solid var(--line); border-radius: 18px; padding: 25px 24px; background: #172920; }
+  .node .role { display: block; color: #54f68d; font: 750 12px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em; text-transform: uppercase; margin-bottom: 18px; }
+  .node h3 { font-size: 25px; }
+  .node p { color: #b3c4b9; font-size: 16px; margin-top: 14px; }
+  .arrow { color: #54f68d; font-size: 33px; text-align: center; }
+  .under { margin-top: 23px; padding: 16px 20px; border: 1px solid var(--line); border-radius: 12px; color: var(--muted); font-size: 17px; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 32px; }
+  .runtime { min-height: 286px; border-radius: 16px; padding: 28px 30px; border: 1px solid var(--line); }
+  .runtime:first-child { background: #e4f5e7; }
+  .runtime:last-child { background: #f1f3ee; }
+  .runtime .runtime-label { color: #1d9849; font: 800 12px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .17em; text-transform: uppercase; }
+  .runtime h3 { margin-top: 15px; font-size: 28px; }
+  .runtime p { margin-top: 12px; font-size: 18px; color: #4b6253; }
+  .callout { margin-top: 24px; border-left: 5px solid #1baf55; padding: 8px 0 8px 20px; color: var(--muted); font-size: 17px; line-height: 1.4; }
+  .proof-grid { display: grid; grid-template-columns: 1.05fr .95fr; gap: 44px; margin-top: 36px; align-items: start; }
+  .proof-list { display: grid; gap: 18px; }
+  .proof-item { display: flex; gap: 15px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+  .proof-item .num { color: #28e873; font: 750 17px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .proof-item p { font-size: 18px; line-height: 1.35; }
+  .terminal { min-height: 313px; background: #15271e; border: 1px solid #40634c; border-radius: 15px; padding: 23px 25px; color: #c7d9cc; font: 16px/1.9 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .terminal b { color: #5af48b; font-weight: 650; }
+  .terminal .dim { color: #7f9a88; }
+  .metrics { margin-top: 37px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+  .metric { height: 235px; padding: 25px 18px 24px; border: 1px solid var(--line); border-radius: 14px; display: flex; flex-direction: column; justify-content: space-between; }
+  .metric .big { font-size: 57px; font-weight: 830; letter-spacing: -.065em; line-height: 1; color: #54f68d; }
+  .metric p { font-size: 17px; line-height: 1.28; color: #becfc3; }
+  .metric small { color: #8ba395; font-size: 12px; line-height: 1.35; }
+  .clarify { margin-top: 28px; color: #aec3b4; font-size: 16px; }
+  .sequence { display: grid; grid-template-columns: 1fr 30px 1fr 30px 1fr; gap: 16px; align-items: center; margin-top: 45px; }
+  .seq { height: 235px; border: 1px solid var(--line); border-radius: 17px; padding: 27px 25px; background: rgba(255,255,255,.58); }
+  .seq b { display: block; font: 750 13px ui-monospace, SFMono-Regular, Menlo, monospace; color: #198f47; letter-spacing: .1em; margin-bottom: 20px; }
+  .seq p { font-size: 17px; color: var(--muted); margin-top: 14px; }
+  .light-arrow { color: #198f47; text-align: center; font-size: 35px; }
+  .bottom-note { margin-top: 28px; font-size: 17px; color: var(--muted); }
+  .surfaces { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 18px; margin-top: 45px; }
+  .surface { min-height: 285px; border-radius: 15px; border: 1px solid var(--line); padding: 26px 22px; }
+  .surface h3 { margin: 22px 0 16px; }
+  .surface p { font-size: 17px; color: var(--muted); }
+  .surface .state { font: 750 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: #198f47; letter-spacing: .11em; text-transform: uppercase; }
+  .service-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; margin-top: 34px; }
+  .service { min-height: 169px; padding: 25px 27px; border-radius: 14px; border: 1px solid var(--line); background: #172920; }
+  .service .index { color: #54f68d; font: 750 14px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .service h3 { margin: 12px 0 8px; font-size: 23px; }
+  .service p { font-size: 16px; color: #b5c9bb; }
+  .boundaries { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; margin-top: 32px; }
+  .boundary { min-height: 162px; border-top: 2px solid #1ba955; padding: 18px 25px 15px 0; }
+  .boundary h3 { font-size: 21px; }
+  .boundary p { color: var(--muted); font-size: 17px; line-height: 1.36; margin-top: 9px; }
+  .closing { max-width: 960px; }
+  .closing h1 { font-size: 75px; }
+  .closing .lead { font-size: 26px; color: #c5d7c9; margin: 25px 0 32px; }
+  .closing-steps { border-top: 1px solid var(--line); padding-top: 23px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; }
+  .closing-steps strong { display: block; color: #54f68d; font-size: 19px; margin-bottom: 8px; }
+  .closing-steps p { color: #afc2b5; font-size: 16px; }
+  .controls { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 18px; padding: 8px 13px; border-radius: 12px; background: #0e1b16; color: #f6faf5; z-index: 10; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .controls button { padding: 4px 10px; border: 1px solid #3d5b47; border-radius: 7px; background: transparent; color: #f6faf5; cursor: pointer; }
+  .controls button:disabled { opacity: .35; cursor: default; }
+  .controls .hint { color: #a9c0af; font-size: 11px; }
+  @page { size: 13.333in 7.5in; margin: 0; }
+  @media print {
+    html, body { margin: 0; background: white; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+    .viewport { margin: 0; width: auto !important; height: auto !important; }
+    .deck { width: auto; height: auto; transform: none !important; }
+    .slide, .slide.active { display: block !important; break-after: page; page-break-after: always; }
+    .slide:last-child { break-after: auto; page-break-after: auto; }
+    .controls { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="viewport" id="viewport"><main class="deck" id="deck" aria-label="Cerberus submission slide deck">
+  <section class="slide dark active" aria-label="Title">
+    <div class="brand"><span class="brand-mark"></span>CERBERUS <small>BLAST RADIUS ZERO</small></div>
+    <div class="intro">
+      <div class="intro-copy">
+        <p class="eyebrow">Vultr hackathon submission</p>
+        <h1>Run it.<br>Prove it.<br><span class="accent">Retire the box.</span></h1>
+        <div class="intro-rule"></div>
+        <p class="subline">Defensive repository verification with observed exploits, isolated execution, and a disposable second chance to prove a fix.</p>
+        <div class="chips"><span class="chip filled">Real execution</span><span class="chip">Canary evidence</span><span class="chip">Disposable VX1</span></div>
+      </div>
+      <img class="intro-logo" src="cerberus.jpg" alt="Cerberus three-headed green logo">
+    </div>
+    <div class="foot"><span>Submission deck · documented prototype evidence</span><span>01 / 12</span></div>
+  </section>
+
+  <section class="slide" aria-label="The problem">
+    <div class="brand"><span class="brand-mark"></span>CERBERUS <small>THE PROBLEM</small></div>
+    <p class="eyebrow">The gap</p>
+    <h2>A model can suspect a flaw.<br><span class="accent">Only execution can prove one.</span></h2>
+    <div class="compare">
+      <div class="panel"><div class="tag">Source-only claim</div><h3>“This route looks vulnerable.”</h3><p>A plausible code path is useful for triage, but it is not evidence that an exploit worked in the running app.</p></div>
+      <div class="panel"><div class="tag">Environment-owned proof</div><h3>“This request returned our canary.”</h3><p>Run the app in isolation, send a real test request, and let observed behavior decide whether to report a finding.</p></div>
+    </div>
+    <p class="statement">Our rule: <span class="accent">no finding without a proof.</span></p>
+    <div class="foot"><span>Source: README · verification workflow; finder/README.md</span><span>02 / 12</span></div>
+  </section>
+
+  <section class="slide soft" aria-label="Workflow">
+    <div class="brand"><span class="brand-mark"></span>CERBERUS <small>THE WORKFLOW</small></div>
+    <p class="eyebrow">One run, bounded from start to finish</p>
+    <h2>Find → prove → patch → re-prove.</h2>
+    <div class="steps">
+      <div class="step"><b>01 / INTAKE</b><strong>Choose a target</strong><p>Allowlisted seeded app or a repo path / HTTPS clone address.</p></div>
+      <div class="step"><b>02 / ISOLATE</b><strong>Start a disposable VX1</strong><p>Fetch staged source, run the target with gVisor or Microsandbox, and health-check over the VPC.</p></div>
+      <div class="step"><b>03 / TRIAGE</b><strong>Rank candidate sinks</strong><p>Recon and static analysis feed Vultr Inference; an honest offline fallback exists.</p></div>
+      <div class="step"><b>04 / CONFIRM</b><strong>Fire real HTTP tests</strong><p>Report a finding only when a planted, non-sensitive canary is observed.</p></div>
+      <div class="step"><b>05 / REMEDIATE</b><strong>Patch a copy</strong><p>Optional re-exploitation runs on a second disposable VX1 in the same runtime.</p></div>
+      <div class="step"><b>06 / CLEAN UP</b><strong>Verify deletion</strong><p>Check the VX1 returns 404; delete staged source and return bounded results.</p></div>
+    </div>
+    <div class="foot"><span>Source: README · VPC sandbox path and scan API</span><span>03 / 12</span></div>
+  </section>
+
+  <section class="slide dark" aria-label="Architecture">
+    <div class="brand"><span class="brand-mark"></span>CERBERUS <small>VULTR ARCHITECTURE</small></div>
+    <p class="eyebrow">Three roles, one execution boundary</p>
+    <h2>The target never needs the control plane's cloud keys.</h2>
+    <div class="architecture">
+      <div class="node"><span class="role">Public-facing demo tier</span><h3>Web page + proxy</h3><p>Password-gated browser UI; server-side proxy holds the control bearer.</p></div>
+      <div class="arrow">→</div>
+      <div class="node"><span class="role">Persistent VX1 · Chicago</span><h3>Control plane</h3><p>FastAPI jobs, Vultr API, inference, repo source, and per-run readiness registry.</p></div>
+      <div class="arrow">→</div>
+      <div class="node"><span class="role">Disposable VX1 · per scan</span><h3>Sandbox host</h3><p>Runs target on a verified VPC address, then destroys the host after the job.</p></div>
+    </div>
+    <div class="under">Web → control: NetBird private operator link &nbsp;·&nbsp; Control ↔ sandbox: Vultr VPC &nbsp;·&nbsp; Source transfer: scoped, presigned Object Storage GET</div>
+    <div class="foot"><span>Source: README · VPC sandbox path; web_tier.py</span><span>04 / 12</span></div>
+  </section>
+
+  <section class="slide" aria-label="Isolation choices">
+    <div class="brand"><span class="brand-mark"></span>CERBERUS <small>RUNTIME CHOICES</small></div>
+    <p class="eyebrow">Inside the disposable Vultr VX1</p>
+    <h2>Choose the boundary for the workload.</h2>
+    <div class="two-col">
+      <div class="runtime"><span class="runtime-label">Option 1 / Container</span><h3>gVisor · runsc</h3><p>A userspace syscall boundary around the running app. Images are built under <span class="mono">runc</span> on the disposable host, then run with <span class="mono">--runtime=runsc</span>.</p></div>
+      <div class="runtime"><span class="runtime-label">Option 2 / KVM microVM</span><h3>Microsandbox</h3><p>A separate guest-kernel boundary. The target and its dependency installation run inside the microVM on the same disposable VX1.</p></div>
+    </div>
+    <div class="callout">Both modes use a disposable outer VX1. Neither runtime by itself proves blanket egress isolation; the current microVM path keeps its default network posture.</div>
+    <div class="foot"><span>Source: README · sandbox scan; instance_lifecycle.py</span><span>05 / 12</span></div>
+  </section>
+
+  <section class="slide dark" aria-label="Canary proof">
+    <div class="brand"><span class="brand-mark"></span>CERBERUS <small>PROOF STANDARD</small></div>
+    <p class="eyebrow">The environment is the judge</p>
+    <h2>The model ranks. The canary decides.</h2>
+    <div class="proof-grid">
+      <div class="proof-list">
+        <div class="proof-item"><span class="num">01</span><p>Recon and static sweep identify reachable candidate sinks.</p></div>
+        <div class="proof-item"><span class="num">02</span><p>Vultr Inference ranks a test plan; offline heuristic is labeled when used.</p></div>
+        <div class="proof-item"><span class="num">03</span><p>A real confirmer sends HTTP probes to the running app.</p></div>
+        <div class="proof-item"><span class="num">04</span><p>Only an observed, request-attributed canary becomes a finding.</p></div>
+      </div>
+      <div class="terminal"><div class="dim">candidate&nbsp; → SQL sink</div><div>request&nbsp;&nbsp;&nbsp; → test payload fired</div><div>response&nbsp; → <b>canary observed</b></div><div>finding&nbsp;&nbsp; → <b>confirmed</b></div><br><div class="dim">no canary ≠ app is safe</div></div>
+    </div>
+    <div class="foot"><span>Source: README · scan API; finder/confirm.py</span><span>06 / 12</span></div>
+  </section>
+
+  <section class="slide dark" aria-label="Documented live evidence">
+    <div class="brand"><span class="brand-mark"></span>CERBERUS <small>DOCUMENTED LIVE EVIDENCE</small></div>
+    <p class="eyebrow">Real-stack runs recorded in README · 2026-09-27</p>
+    <h2>What the prototype has actually shown.</h2>
+    <div class="metrics">
+      <div class="metric"><div class="big">5/5</div><p>Confirmed classes on each of two seeded apps</p><small>gVisor scans with live Vultr Inference</small></div>
+      <div class="metric"><div class="big">5/5</div><p>Certified closed in a documented remediation run</p><small>Re-exploit on a second disposable VX1</small></div>
+      <div class="metric"><div class="big">+3</div><p>Host drop-counter change with matching kernel log</p><small>Controlled VPC sandbox smoke probe</small></div>
+      <div class="metric"><div class="big">404</div><p>Independent check after VX1 destruction</p><small>Cleanup confirmed for recorded runs</small></div>
+    </div>
+    <p class="clarify">Separate demonstrations: controlled network smoke is not a general egress proof; seeded app success is not arbitrary-repo coverage. Microsandbox also returned 5/5 seeded findings in a recorded run.</p>
+    <div class="foot"><span>Source: README · VPC sandbox smoke and sandbox scan</span><span>07 / 12</span></div>
+  </section>
+
+  <section class="slide soft" aria-label="Remediation loop">
+    <div class="brand"><span class="brand-mark"></span>CERBERUS <small>REMEDIATION</small></div>
+    <p class="eyebrow">A fix has to survive the same test</p>
+    <h2>Patch a disposable copy. Re-run the exploit.</h2>
+    <div class="sequence">
+      <div class="seq"><b>PASS ONE · FIND</b><h3>Prove the breach</h3><p>Run the original target on VX1 #1, capture a canary-confirmed exploit, and destroy that VX1.</p></div>
+      <div class="light-arrow">→</div>
+      <div class="seq"><b>PATCH · CONTROL PLANE</b><h3>Prepare the fix</h3><p>Apply accepted candidate patches to one cumulative disposable source copy; leave the original untouched.</p></div>
+      <div class="light-arrow">→</div>
+      <div class="seq"><b>PASS TWO · VERIFY</b><h3>Re-exploit on VX1 #2</h3><p>Block the prior exploit, preserve functional behavior, validate the patch, then destroy the second VX1.</p></div>
+    </div>
+    <p class="bottom-note">“Certified closed” means those tested exploit paths were re-checked—not a guarantee that the repository is safe from all vulnerabilities.</p>
+    <div class="foot"><span>Source: README · sandbox scan; finder/remediate.py</span><span>08 / 12</span></div>
+  </section>
+
+  <section class="slide" aria-label="Demo surfaces">
+    <div class="brand"><span class="brand-mark"></span>CERBERUS <small>JUDGE DEMO</small></div>
+    <p class="eyebrow">Show the correct surface for each claim</p>
+    <h2>Three interfaces. Different evidence.</h2>
+    <div class="surfaces">
+      <div class="surface"><span class="state">Live-page code path</span><h3>Sandbox job UI</h3><p><span class="mono">site/live.html</span> calls a password-gated proxy, which arms and starts a real <span class="mono">sandbox_scan</span> through the control API.</p></div>
+      <div class="surface"><span class="state">Interactive local demo</span><h3>Animated console</h3><p>The finder and patch loop are real, but this console starts its target as a local subprocess. Its VM animation is not live sandbox execution.</p></div>
+      <div class="surface"><span class="state">Presentation only</span><h3>Showcase site</h3><p><span class="mono">site/index.html</span> tells the story using captured results; it is not connected to the backend.</p></div>
+    </div>
+    <div class="foot"><span>Source: web_proxy.py; demo_server.py; site/README.md</span><span>09 / 12</span></div>
+  </section>
+
+  <section class="slide dark" aria-label="Vultr platform">
+    <div class="brand"><span class="brand-mark"></span>CERBERUS <small>WHY VULTR</small></div>
+    <p class="eyebrow">The orchestration center, not just a place to host a page</p>
+    <h2>Vultr powers every critical step.</h2>
+    <div class="service-grid">
+      <div class="service"><span class="index">01 / CLOUD COMPUTE</span><h3>Persistent control + disposable VX1s</h3><p>One private planner; fresh host for target execution and another when re-exploitation is requested.</p></div>
+      <div class="service"><span class="index">02 / SERVERLESS INFERENCE</span><h3>Reachability-aware triage</h3><p>The model ranks candidate sinks into a test plan; recorded results disclose the model path.</p></div>
+      <div class="service"><span class="index">03 / VPC</span><h3>Private control-to-sandbox path</h3><p>Provider-verified guest VPC IP, callback-only listener, and a private target endpoint.</p></div>
+      <div class="service"><span class="index">04 / OBJECT STORAGE</span><h3>Scoped source transfer</h3><p>Deterministic source tarball staged privately and fetched with a short-lived single-object presigned GET.</p></div>
+    </div>
+    <div class="foot"><span>Source: README · VPC sandbox path and sandbox scan</span><span>10 / 12</span></div>
+  </section>
+
+  <section class="slide" aria-label="Honest boundaries">
+    <div class="brand"><span class="brand-mark"></span>CERBERUS <small>HONEST BOUNDARIES</small></div>
+    <p class="eyebrow">What we will not claim</p>
+    <h2>Strong evidence has a defined scope.</h2>
+    <div class="boundaries">
+      <div class="boundary"><h3>Arbitrary repos are not 5/5 by default</h3><p>SQLi and IDOR require app-specific canaries. Manifest-less environmental canaries currently need to move from the control host into the remote sandbox.</p></div>
+      <div class="boundary"><h3>Network containment is not universal</h3><p>Controlled drop evidence is real; it does not prove all egress is denied. Microsandbox retains its default network posture.</p></div>
+      <div class="boundary"><h3>Some trust boundaries remain to harden</h3><p>gVisor image builds execute under <span class="mono">runc</span> on the disposable host. The web demo's password can authorize sequential billable jobs.</p></div>
+      <div class="boundary"><h3>Prototype records are not signed receipts</h3><p>Job state is in memory; durable history, signed commit-bound receipts, and production-grade auth and spending controls remain future work.</p></div>
+    </div>
+    <div class="foot"><span>Source: README · limitations; finder/env_canary.py; jobs.py</span><span>11 / 12</span></div>
+  </section>
+
+  <section class="slide dark" aria-label="Closing">
+    <div class="brand"><span class="brand-mark"></span>CERBERUS <small>BLAST RADIUS ZERO</small></div>
+    <div class="closing">
+      <p class="eyebrow">Cerberus</p>
+      <h1>Proof, not <span class="accent">promises.</span></h1>
+      <p class="lead">The model proposes where to look. The running target and canary provide the verdict. The disposable host is destroyed.</p>
+      <div class="closing-steps">
+        <div><strong>See a finding</strong><p>Inspect its actual request and redacted canary evidence.</p></div>
+        <div><strong>See the fix</strong><p>Re-exploit the patched disposable copy on a second VX1.</p></div>
+        <div><strong>See the cleanup</strong><p>Verify the VX1 returns 404 and staged source is removed.</p></div>
+      </div>
+    </div>
+    <div class="foot"><span>Submission demo: seeded sandbox scan · README documents live evidence</span><span>12 / 12</span></div>
+  </section>
+</main></div>
+<div class="controls" aria-label="Slide controls"><button id="prev" aria-label="Previous slide">←</button><span id="counter">01 / 12</span><button id="next" aria-label="Next slide">→</button><span class="hint">← → or space · Print for PDF</span></div>
+<script>
+  const slides = Array.from(document.querySelectorAll('.slide'));
+  const counter = document.getElementById('counter');
+  const prev = document.getElementById('prev');
+  const next = document.getElementById('next');
+  const viewport = document.getElementById('viewport');
+  const deck = document.getElementById('deck');
+  let index = Math.max(0, Math.min(slides.length - 1, Number(location.hash.slice(1)) - 1 || 0));
+  function resize() {
+    const scale = Math.min((window.innerWidth - 36) / 1280, (window.innerHeight - 86) / 720, 1);
+    viewport.style.width = `${1280 * scale}px`;
+    viewport.style.height = `${720 * scale}px`;
+    deck.style.transform = `scale(${scale})`;
+    viewport.style.marginTop = `${Math.max(12, (window.innerHeight - 66 - 720 * scale) / 2)}px`;
+  }
+  function show(n) {
+    index = Math.max(0, Math.min(slides.length - 1, n));
+    slides.forEach((slide, i) => slide.classList.toggle('active', i === index));
+    counter.textContent = `${String(index + 1).padStart(2, '0')} / ${String(slides.length).padStart(2, '0')}`;
+    prev.disabled = index === 0;
+    next.disabled = index === slides.length - 1;
+    history.replaceState(null, '', `#${index + 1}`);
+  }
+  prev.addEventListener('click', () => show(index - 1));
+  next.addEventListener('click', () => show(index + 1));
+  document.addEventListener('keydown', (event) => {
+    if (['ArrowRight', 'PageDown', ' '].includes(event.key)) { event.preventDefault(); show(index + 1); }
+    if (['ArrowLeft', 'PageUp'].includes(event.key)) { event.preventDefault(); show(index - 1); }
+  });
+  window.addEventListener('resize', resize);
+  window.addEventListener('hashchange', () => show(Number(location.hash.slice(1)) - 1 || 0));
+  show(index);
+  resize();
+</script>
+</body>
+</html>

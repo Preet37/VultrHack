@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cerberus | Architecture</title>
+<style>
+  :root { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0b1512; color: #f1f7f2; }
+  .stage { position: relative; width: 1480px; height: 1055px; margin: 0 auto; padding: 56px 60px 40px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .brand { display: flex; align-items: center; gap: 10px; font-size: 16px; font-weight: 850; letter-spacing: .08em; }
+  .brand-mark { width: 15px; height: 15px; background: #28e873; transform: rotate(-15deg); border-radius: 4px; }
+  .brand small { font-size: 11px; font-weight: 700; letter-spacing: .16em; color: #7f9689; margin-left: 12px; }
+  h1 { margin: 22px 0 6px; font-size: 36px; letter-spacing: -.03em; font-weight: 820; }
+  .sub { margin: 0 0 4px; color: #9db2a4; font-size: 15px; max-width: 940px; line-height: 1.4; }
+  .canvas { position: relative; width: 100%; height: 800px; margin-top: 22px; }
+  svg.wires { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+  .node { position: absolute; border-radius: 14px; padding: 15px 18px; background: #132621; border: 1px solid #2c4a3a; }
+  .node.accentnode { border-color: #54f68d; box-shadow: 0 0 0 1px rgba(84,246,141,.18); }
+  .node.dashed { border-style: dashed; opacity: .92; }
+  .node.service { background: #101f1b; }
+  .node .role { display: block; font: 750 10px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .13em; text-transform: uppercase; color: #54f68d; margin-bottom: 7px; }
+  .node .role.grey { color: #7f9689; }
+  .node h3 { margin: 0 0 6px; font-size: 16.5px; letter-spacing: -.02em; }
+  .node p { margin: 0; font-size: 12px; line-height: 1.42; color: #a9bdb1; }
+  .node ul { margin: 7px 0 0; padding: 0 0 0 14px; font-size: 11.5px; line-height: 1.5; color: #a9bdb1; }
+  .edge-label { position: absolute; font: 700 10.5px ui-monospace, SFMono-Regular, Menlo, monospace; color: #7fe8a9; background: #0b1512; padding: 2px 7px; border-radius: 6px; border: 1px solid #2c4a3a; white-space: nowrap; }
+  .edge-label.dim { color: #9db2a4; border-color: #33473c; }
+  .legend { position: absolute; right: 60px; bottom: 4px; display: flex; gap: 22px; font-size: 12px; color: #9db2a4; align-items: center; }
+  .legend .swatch { display: inline-flex; align-items: center; gap: 8px; }
+  .legend .line { width: 26px; height: 2px; background: #54f68d; display: inline-block; }
+  .legend .line.dash { background: none; border-top: 2px dashed #6c8577; }
+  .foot { position: absolute; left: 60px; bottom: 4px; font-size: 12px; color: #6c8577; }
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="brand"><span class="brand-mark"></span>CERBERUS <small>VULTR ARCHITECTURE</small></div>
+  <h1>Control plane, disposable sandbox, one boundary.</h1>
+  <p class="sub">The control plane never hands its Vultr keys, inference key, or control token to sandboxed code. Solid lines are the documented live path; the dashed path only runs when a scan is submitted with <span class="mono">remediate: true</span>.</p>
+
+  <div class="canvas" id="canvas">
+    <svg class="wires" id="wires"></svg>
+
+    <div class="node" id="n-browser" style="left:0px; top:0px; width:210px;">
+      <span class="role grey">VISITOR</span>
+      <h3>Browser</h3>
+      <p>Password login → signed session cookie. No repo, Vultr, or control credentials reach this client.</p>
+    </div>
+
+    <div class="node" id="n-web" style="left:0px; top:200px; width:210px;">
+      <span class="role">PERSISTENT VX1<br>CHICAGO</span>
+      <h3>Web tier</h3>
+      <p>Serves <span class="mono">live.html</span>; proxy holds the control bearer server-side and arms jobs for the visitor.</p>
+    </div>
+
+    <div class="node accentnode" id="n-control" style="left:340px; top:0px; width:330px;">
+      <span class="role">PERSISTENT VX1 · CHICAGO</span>
+      <h3>Control plane</h3>
+      <p>FastAPI job API, per-run readiness registry, Vultr account + inference keys, control token.</p>
+      <ul>
+        <li>Stages target source privately</li>
+        <li>Verifies guest VPC attachment before trust</li>
+        <li>Runs finder probes over the VPC</li>
+        <li>Confirms 404 + deletes staged source</li>
+      </ul>
+    </div>
+
+    <div class="node service" id="n-vultrapi" style="left:790px; top:0px; width:230px;">
+      <span class="role grey">VULTR API v2</span>
+      <h3>Provider control</h3>
+      <p>Create / poll VPC attachment / destroy each disposable instance.</p>
+    </div>
+
+    <div class="node service" id="n-inference" style="left:790px; top:150px; width:230px;">
+      <span class="role grey">VULTR SERVERLESS INFERENCE</span>
+      <h3>Triage model</h3>
+      <p>Ranks candidate sinks into a test plan; offline heuristic labeled when no key is set.</p>
+    </div>
+
+    <div class="node service" id="n-storage" style="left:790px; top:300px; width:230px;">
+      <span class="role grey">VULTR OBJECT STORAGE</span>
+      <h3>Private bucket</h3>
+      <p>One-object presigned GET/POST per run for staged source and NIC diagnostics.</p>
+    </div>
+
+    <div class="node accentnode" id="n-sandbox1" style="left:340px; top:420px; width:330px;">
+      <span class="role">DISPOSABLE VX1 · PER SCAN</span>
+      <h3>Sandbox host #1 — target</h3>
+      <p>Fetches staged source, runs it under gVisor (<span class="mono">runsc</span>) or a Microsandbox KVM microVM, bound to its verified VPC IPv4:8081.</p>
+    </div>
+
+    <div class="node dashed" id="n-sandbox2" style="left:340px; top:660px; width:330px;">
+      <span class="role grey">DISPOSABLE VX1 · IF remediate:true</span>
+      <h3>Sandbox host #2 — re-exploit</h3>
+      <p>Hosts the patched cumulative copy once, so the fix is re-proven in the same isolated runtime — never on host #1 or the control plane.</p>
+    </div>
+
+    <div class="node service" id="n-provider2" style="left:790px; top:660px; width:230px;">
+      <span class="role grey">VULTR API v2</span>
+      <h3>Teardown, both hosts</h3>
+      <p>Each disposable VX1 is destroyed and its 404 is confirmed independently, even after a failed run.</p>
+    </div>
+
+    <div class="node service" id="n-web2" style="left:0px; top:420px; width:210px;">
+      <span class="role grey">NETBIRD</span>
+      <h3>Operator link only</h3>
+      <p>Web tier and control-plane operator socket both require a NetBird-address peer; no public exposure.</p>
+    </div>
+  </div>
+
+  <div class="legend">
+    <span class="swatch"><span class="line"></span>Live / documented path</span>
+    <span class="swatch"><span class="line dash"></span>Optional: remediation pass</span>
+  </div>
+  <div class="foot">Source: README (VPC sandbox path, sandbox scan) · web_proxy.py · web_tier.py · jobs.py · instance_lifecycle.py</div>
+</div>
+<script>
+  function box(id) {
+    const el = document.getElementById(id);
+    const canvas = document.getElementById('canvas');
+    const r = el.getBoundingClientRect();
+    const c = canvas.getBoundingClientRect();
+    return { x: r.left - c.left, y: r.top - c.top, w: r.width, h: r.height };
+  }
+  function anchor(id, side, frac) {
+    frac = frac === undefined ? 0.5 : frac;
+    const b = box(id);
+    switch (side) {
+      case 'right': return { x: b.x + b.w, y: b.y + b.h * frac };
+      case 'left': return { x: b.x, y: b.y + b.h * frac };
+      case 'top': return { x: b.x + b.w * frac, y: b.y };
+      case 'bottom': return { x: b.x + b.w * frac, y: b.y + b.h };
+      default: return { x: b.x + b.w / 2, y: b.y + b.h / 2 };
+    }
+  }
+  function addLabel(x, y, text, dim) {
+    const lbl = document.createElement('div');
+    lbl.className = 'edge-label' + (dim ? ' dim' : '');
+    lbl.textContent = text;
+    lbl.style.left = `${x}px`;
+    lbl.style.top = `${y}px`;
+    document.getElementById('canvas').appendChild(lbl);
+  }
+  function drawStraight(svg, a, b, dashed) {
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    const midX = (a.x + b.x) / 2;
+    path.setAttribute('d', `M ${a.x} ${a.y} C ${midX} ${a.y}, ${midX} ${b.y}, ${b.x} ${b.y}`);
+    path.setAttribute('fill', 'none');
+    path.setAttribute('stroke', dashed ? '#6c8577' : '#54f68d');
+    path.setAttribute('stroke-width', dashed ? '1.6' : '2');
+    if (dashed) path.setAttribute('stroke-dasharray', '6 6');
+    path.setAttribute('marker-end', dashed ? 'url(#arrow-dim)' : 'url(#arrow)');
+    svg.appendChild(path);
+  }
+  function drawVia(svg, a, viaX, viaY, b, dashed) {
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', `M ${a.x} ${a.y} Q ${viaX} ${viaY}, ${b.x} ${b.y}`);
+    path.setAttribute('fill', 'none');
+    path.setAttribute('stroke', dashed ? '#6c8577' : '#54f68d');
+    path.setAttribute('stroke-width', dashed ? '1.6' : '2');
+    if (dashed) path.setAttribute('stroke-dasharray', '6 6');
+    path.setAttribute('marker-end', dashed ? 'url(#arrow-dim)' : 'url(#arrow)');
+    svg.appendChild(path);
+  }
+  const svg = document.getElementById('wires');
+  const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+  defs.innerHTML = `
+    <marker id="arrow" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#54f68d"/></marker>
+    <marker id="arrow-dim" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#6c8577"/></marker>
+  `;
+  svg.appendChild(defs);
+
+  // Browser -> Web tier
+  drawStraight(svg, anchor('n-browser', 'bottom', 0.5), anchor('n-web', 'top', 0.5));
+  addLabel(box('n-browser').x + 6, box('n-browser').y + box('n-browser').h + 6, 'HTTPS · password login');
+
+  // Web tier -> Control plane
+  drawStraight(svg, anchor('n-web', 'right', 0.35), anchor('n-control', 'left', 0.15));
+  addLabel(240, 40, 'NetBird · tcp/8000');
+  addLabel(240, 60, 'control bearer', true);
+
+  // Control plane -> Vultr API v2 / Inference / Storage
+  drawStraight(svg, anchor('n-control', 'right', 0.12), anchor('n-vultrapi', 'left', 0.3));
+  addLabel(688, 8, 'create / poll / destroy');
+  drawStraight(svg, anchor('n-control', 'right', 0.5), anchor('n-inference', 'left', 0.5));
+  addLabel(690, 175, 'triage ranking');
+  drawStraight(svg, anchor('n-control', 'right', 0.88), anchor('n-storage', 'left', 0.5));
+  addLabel(690, 320, 'presigned GET/POST');
+
+  // Control plane -> Sandbox host #1 (down), and back up for scan traffic
+  drawStraight(svg, anchor('n-control', 'bottom', 0.3), anchor('n-sandbox1', 'top', 0.3));
+  addLabel(360, 372, 'VPC · target_run');
+  drawStraight(svg, anchor('n-sandbox1', 'top', 0.7), anchor('n-control', 'bottom', 0.7));
+  addLabel(500, 372, 'readiness + scan traffic', true);
+
+  // Control plane -> Sandbox host #2 (dashed), routed right of sandbox #1
+  drawVia(svg, anchor('n-control', 'bottom', 0.95), 705, 530, anchor('n-sandbox2', 'right', 0.15), true);
+  addLabel(690, 440, 'remediate: true', true);
+  addLabel(690, 470, '→ 2nd VX1', true);
+
+  // Sandbox hosts -> Vultr API v2 (teardown)
+  drawStraight(svg, anchor('n-sandbox1', 'right', 0.65), anchor('n-provider2', 'left', 0.15));
+  addLabel(690, 645, 'destroy + 404');
+  drawStraight(svg, anchor('n-sandbox2', 'right', 0.75), anchor('n-provider2', 'left', 0.8), true);
+  addLabel(690, 800, 'destroy + 404', true);
+</script>
+</body>
+</html>
