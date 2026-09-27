@@ -7,10 +7,13 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import tarfile
+import tempfile
 import time
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 from pathlib import Path
 from uuid import uuid4
 
@@ -107,7 +110,7 @@ class JobRegistry:
         self.arm_hold_seconds = 0
         return hold
 
-    def create(self, kind="connectivity", setup_key=None, signals=None, vpc_mode=False, target=None, diagnostic_hold_seconds=None, diagnostic_upload=None, target_runtime="gvisor", remediate=False):
+    def create(self, kind="connectivity", setup_key=None, signals=None, vpc_mode=False, target=None, diagnostic_hold_seconds=None, diagnostic_upload=None, target_runtime="gvisor", remediate=False, repo=None, entrypoint=None):
         if kind not in ("connectivity", "sandbox_smoke", "scan", "sandbox_scan"):
             raise ValueError("Unsupported job type")
         if remediate and kind != "sandbox_scan":
@@ -122,7 +125,9 @@ class JobRegistry:
         if kind == "sandbox_scan":
             if signals is None or setup_key or diagnostic_hold_seconds is not None or diagnostic_upload is not None:
                 raise ValueError("Sandbox scan requires readiness signals and no smoke options")
-            if target not in SCAN_TARGETS:
+            if (target is None) == (repo is None):
+                raise ValueError("Sandbox scan needs exactly one of target or repo")
+            if target is not None and target not in SCAN_TARGETS:
                 raise ValueError("Unknown scan target")
             # One disposable VX1 at a time, shared with sandbox smoke jobs.
             if any(job.kind in ("sandbox_smoke", "sandbox_scan") and job.status not in TERMINAL for job in self.jobs.values()):
@@ -145,7 +150,7 @@ class JobRegistry:
         elif kind == "scan":
             worker = run_scan_job(job, target)
         elif kind == "sandbox_scan":
-            worker = run_sandbox_scan_job(job, target, signals, target_runtime=target_runtime, remediate=remediate)
+            worker = run_sandbox_scan_job(job, target, signals, target_runtime=target_runtime, remediate=remediate, repo=repo, entrypoint=entrypoint)
         elif vpc_mode:
             options = {"diagnostic_hold_seconds": diagnostic_hold_seconds} if diagnostic_hold_seconds is not None else {}
             if diagnostic_upload is not None:
@@ -453,7 +458,42 @@ async def run_sandbox_smoke_job(job, setup_key, signals, vpc_mode=False, diagnos
             signals.unregister(token)
 
 
-async def run_sandbox_scan_job(job, target_name, signals, target_runtime="gvisor", remediate=False):
+def resolve_scan_source(repo):
+    """Return (source_dir, cleanup) for an arbitrary repo: local absolute dir or https git URL."""
+    if repo is None:
+        raise ValueError("Repo source required")
+    if not isinstance(repo, str):
+        raise ValueError("Repo source must be a path or https git URL")
+    if repo.startswith("https://"):
+        try:
+            url = urlsplit(repo)
+            host = url.hostname
+        except ValueError:
+            raise ValueError("Invalid repo URL") from None
+        if not host or url.username is not None or url.password is not None or url.fragment or "/../" in url.path or url.path in ("", "/"):
+            raise ValueError("Repo URL must be a plain https clone address")
+        clone_dir = Path(tempfile.mkdtemp(prefix="cerberus-repo-"))
+        try:
+            subprocess.run(
+                ["git", "-c", "credential.helper=", "clone", "--depth", "1", "--single-branch", "--", repo, str(clone_dir)],
+                check=True, capture_output=True, text=True, timeout=180, env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "true", "SSH_ASKPASS": "true"},
+            )
+        except subprocess.TimeoutExpired:
+            shutil.rmtree(clone_dir, ignore_errors=True)
+            raise ValueError("Repo clone timed out") from None
+        except subprocess.CalledProcessError:
+            shutil.rmtree(clone_dir, ignore_errors=True)
+            raise ValueError("Repo clone failed") from None
+        return str(clone_dir), clone_dir
+    path = Path(repo).expanduser().resolve()
+    if not path.is_absolute() or not path.is_dir():
+        raise ValueError("Repo path must be an absolute existing directory")
+    if "/../" in repo or ".." in path.parts[:-1]:
+        raise ValueError("Repo path must not traverse")
+    return str(path), None
+
+
+async def run_sandbox_scan_job(job, target_name, signals, target_runtime="gvisor", remediate=False, repo=None, entrypoint=None):
     """Scan one seeded target running inside gVisor on a disposable VPC VX1.
 
     Same lifecycle discipline as the VPC smoke (preflight the approved VPC and
@@ -483,7 +523,11 @@ async def run_sandbox_scan_job(job, target_name, signals, target_runtime="gvisor
     from instance_lifecycle import API_URL, DEFAULT_VX1_PLAN, VultrInstances, temporary_instance, validated_vpc_id, validated_vpc_subnet
     from sandbox_platform import VPC_INTERNAL_SUBNET
 
-    source_dir = SCAN_TARGETS.get(target_name)
+    source_dir = SCAN_TARGETS.get(target_name) if target_name is not None else None
+    repo_cleanup = None
+    if repo is not None:
+        resolved, repo_cleanup = resolve_scan_source(repo)
+        source_dir = Path(resolved)
     instance_id = None
     token = None
     failure_stage = None
@@ -516,7 +560,7 @@ async def run_sandbox_scan_job(job, target_name, signals, target_runtime="gvisor
             config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}),
         )
         payload = deterministic_source_tarball(source_dir)
-        entrypoint = (load_manifest(str(source_dir)) or {}).get("entrypoint", "app.py")
+        scan_entrypoint = entrypoint or (load_manifest(str(source_dir)) or {}).get("entrypoint", "app.py")
         api_key, _ = load_keys()
         token = signals.register()
         await job.publish("running", "provisioning")
@@ -538,7 +582,7 @@ async def run_sandbox_scan_job(job, target_name, signals, target_runtime="gvisor
             source_url = presign_source_get(storage, endpoint, bucket, object_key, expires_in=900)
             target_options = {
                 "vpc_callback": True, "vpc_subnet": str(subnet), "vpc_id": vpc_id,
-                "target_run": {"source_url": source_url, "entrypoint": entrypoint, "runtime": target_runtime},
+                "target_run": {"source_url": source_url, "entrypoint": scan_entrypoint, "runtime": target_runtime},
             }
             async with temporary_instance(api, region, os.getenv("VULTR_PLAN", DEFAULT_VX1_PLAN), 2284, callback, token, False, None, False, **target_options) as instance_id:
                 await api.wait_active(instance_id)
@@ -742,6 +786,8 @@ async def run_sandbox_scan_job(job, target_name, signals, target_runtime="gvisor
     finally:
         if token is not None:
             signals.unregister(token)
+        if repo_cleanup is not None:
+            shutil.rmtree(repo_cleanup, ignore_errors=True)
         if storage is not None and bucket is not None and object_key is not None and not object_deleted:
             try:
                 await asyncio.to_thread(storage.delete_object, Bucket=bucket, Key=object_key)

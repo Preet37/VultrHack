@@ -1157,7 +1157,7 @@ def test_registry_shares_one_disposable_vx1_between_smoke_and_scan():
 def test_sandbox_scan_route_arms_and_consumes_one_token_like_vpc_smoke(auth, monkeypatch):
     seen = []
 
-    async def fake_scan(job, target, signals, target_runtime="gvisor", remediate=False):
+    async def fake_scan(job, target, signals, target_runtime="gvisor", remediate=False, repo=None, entrypoint=None):
         seen.append((target, signals, remediate))
         job.result = {"destroyed": True, "vpc_ip": "10.52.0.3"}
         await job.publish("completed")
@@ -1200,7 +1200,7 @@ def test_sandbox_scan_route_arms_and_consumes_one_token_like_vpc_smoke(auth, mon
 def test_enabled_sandbox_scan_needs_no_arm_but_still_requires_approval_and_vpc_config(auth, monkeypatch):
     seen = []
 
-    async def fake_scan(job, target, signals, target_runtime="gvisor", remediate=False):
+    async def fake_scan(job, target, signals, target_runtime="gvisor", remediate=False, repo=None, entrypoint=None):
         seen.append(target)
         job.result = {"destroyed": True}
         await job.publish("completed")
@@ -1234,10 +1234,54 @@ def test_remediate_is_rejected_for_every_job_type_except_sandbox_scan(auth, monk
         assert client.post("/jobs", headers=auth, json={"type": "connectivity", "remediate": "true"}).status_code == 422
 
 
+def test_sandbox_scan_repo_route_requires_exactly_one_of_target_or_repo(auth, monkeypatch):
+    seen = []
+
+    async def fake_scan(job, target, signals, target_runtime="gvisor", remediate=False, repo=None, entrypoint=None):
+        seen.append((target, repo, entrypoint))
+        job.result = {"destroyed": True}
+        await job.publish("completed")
+
+    monkeypatch.setenv("CERBERUS_ENABLE_SANDBOX_JOBS", "true")
+    for name, value in VPC_ENV.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(jobs, "run_sandbox_scan_job", fake_scan)
+    with TestClient(app) as client:
+        assert client.post("/jobs", headers=auth, json={"type": "sandbox_scan", "approve_vm": True}).status_code == 400
+        assert client.post("/jobs", headers=auth, json={"type": "sandbox_scan", "approve_vm": True, "target": "seeded_flask", "repo": "/opt/x"}).status_code == 400
+        started = client.post("/jobs", headers=auth, json={"type": "sandbox_scan", "approve_vm": True, "repo": "/opt/cerberus/targets/seeded_flask", "entrypoint": "app.py"})
+        assert started.status_code == 202
+        assert wait_for_terminal(client, started.json()["id"], auth)["status"] == "completed"
+    assert seen == [(None, "/opt/cerberus/targets/seeded_flask", "app.py")]
+
+
+@pytest.mark.parametrize("repo,ok", [
+    ("/opt/cerberus/targets/seeded_flask", False),
+    ("relative/dir", False),
+    ("https://github.com/c0deine/pinchy", True),
+    ("https://user:pass@github.com/x/y", False),
+    ("http://github.com/x/y", False),
+])
+def test_resolve_scan_source_validation(repo, ok, monkeypatch):
+    if ok:
+        def fake_run(cmd, **kwargs):
+            class R:
+                returncode = 0
+            return R()
+        monkeypatch.setattr(jobs.subprocess, "run", fake_run)
+        src, cleanup = __import__("jobs").resolve_scan_source(repo)
+        assert cleanup is not None
+        import shutil
+        shutil.rmtree(cleanup, ignore_errors=True)
+    else:
+        with pytest.raises(ValueError):
+            __import__("jobs").resolve_scan_source(repo)
+
+
 def test_sandbox_scan_remediate_flag_passes_through_to_the_worker(auth, monkeypatch):
     seen = []
 
-    async def fake_scan(job, target, signals, target_runtime="gvisor", remediate=False):
+    async def fake_scan(job, target, signals, target_runtime="gvisor", remediate=False, repo=None, entrypoint=None):
         seen.append(remediate)
         job.result = {"destroyed": True}
         await job.publish("completed")
