@@ -576,6 +576,12 @@ async def run_sandbox_scan_job(job, target_name, signals, target_runtime="gvisor
     except Exception as error:
         last_stage = signals.stage(token) if token is not None else None
         detail = f"{type(error).__name__}; stage={failure_stage or last_stage or 'none'}"
+        message = str(error).replace("\n", " ")
+        token_secret = control_token()
+        if token_secret:
+            message = message.replace(token_secret, "[redacted]")
+        if message:
+            detail = f"{detail}; message={message[:160]}"
         if failure_detail:
             detail = f"{detail}; guest={failure_detail[:200]}"
         job.error = (

@@ -920,7 +920,7 @@ def test_sandbox_scan_worker_fails_before_provisioning_without_storage_config(mo
     job = jobs.Job(kind="sandbox_scan")
     asyncio.run(jobs.run_sandbox_scan_job(job, "seeded_flask", Signals()))
     assert job.status == "failed" and job.result is None
-    assert job.error == "Sandbox scan failed (ValueError; stage=none) before an instance ID was confirmed"
+    assert job.error == "Sandbox scan failed (ValueError; stage=none; message=Sandbox scan object storage is not configured) before an instance ID was confirmed"
 
 
 def test_deterministic_source_tarball_is_byte_stable_and_safely_shaped(tmp_path):
