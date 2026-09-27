@@ -1,6 +1,7 @@
 import asyncio
 import ipaddress
 import json
+import logging
 import os
 import re
 import secrets
@@ -360,14 +361,14 @@ async def run_sandbox_smoke_job(job, setup_key, signals, vpc_mode=False, diagnos
         }
         if vpc_mode:
             job.result["vpc_ip"] = sandbox_ip
-    except Exception:
+    except Exception as error:
         last_stage = signals.stage(token) if token is not None else None
-        if failure_stage:
-            job.error = f"Sandbox bootstrap failed at {failure_stage}; verify cleanup of instance {instance_id}"
-        elif readiness_timed_out and last_stage:
-            job.error = f"Sandbox readiness timed out after {last_stage}; verify cleanup of instance {instance_id}"
-        else:
-            job.error = f"Sandbox smoke failed; verify cleanup of instance {instance_id}" if instance_id else "Sandbox smoke failed before an instance ID was confirmed"
+        detail = f"{type(error).__name__}; stage={failure_stage or last_stage or 'none'}"
+        job.error = (
+            f"Sandbox smoke failed ({detail}); verify cleanup of instance {instance_id}"
+            if instance_id else f"Sandbox smoke failed ({detail}) before an instance ID was confirmed"
+        )
+        logging.getLogger(__name__).warning("Sandbox smoke failed: %s", detail)
         await job.publish("failed", "teardown")
     else:
         await job.publish("completed", "complete")

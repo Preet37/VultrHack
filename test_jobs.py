@@ -492,7 +492,7 @@ def test_sandbox_worker_proves_private_path_and_cleans_up(monkeypatch, readiness
     if failed_stage:
         assert failed_stage in job.error
     if readiness_fails:
-        assert "timed out after network_create" in job.error
+        assert "stage=network_create" in job.error and "TimeoutError" in job.error
     if not readiness_fails and not missing_log and dns_exit != 0 and not failed_stage:
         assert job.result["destroyed"] is True
         assert job.result["opensandbox"]["exit_code"] == 0
