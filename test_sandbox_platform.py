@@ -420,7 +420,7 @@ def test_vpc_bootstrap_embedded_python_is_valid_and_excludes_netbird_enrolment()
     head, wrapped = script.split("vpc_payload=$(python3 -c ", 1)
     blob = wrapped.split(") && eval", 1)[0].rsplit(" ", 1)[-1]
     script = head + zlib.decompress(base64.b64decode(blob)).decode()
-    encoded = script.split("printf '%s' ", 1)[1].split(" | base64 -d |", 1)[0]
+    encoded = next(c.split(" | base64 -d |", 1)[0] for c in script.split("printf '%s' ")[1:] if " | base64 -d |" in c)
     module = zlib.decompress(base64.b64decode(encoded)).decode()
     config = script.split("PYTHONPATH=/root python3 - <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
     assert "verified_vpc_address" in module and "verified_vpc_address" in config

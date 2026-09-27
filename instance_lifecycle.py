@@ -384,13 +384,13 @@ def docker_user_data(callback_url, ready_token, opensandbox_spike=False, netbird
         f"-H {auth_header} -H 'Content-Type: application/json' "
         f"--data-binary \"$proof\" {shlex.quote(callback_url)}\n"
     )
-    if vpc_callback:
+    if vpc_callback or len(base64.b64encode(script.encode())) >= 16 * 1024:
         head, tail = script[:compressed_tail_start], script[compressed_tail_start:]
         compressed = base64.b64encode(zlib.compress(tail.encode(), level=9)).decode()
         decode = "import base64,sys,zlib;sys.stdout.buffer.write(zlib.decompress(base64.b64decode(sys.argv[1])))"
         script = head + f"vpc_payload=$(python3 -c {shlex.quote(decode)} {compressed}) && eval \"$vpc_payload\"\n"
-    if vpc_callback and len(base64.b64encode(script.encode())) >= 16 * 1024:
-        raise ValueError("VPC cloud-init user-data exceeds the conservative 16 KiB budget")
+        if len(base64.b64encode(script.encode())) >= 16 * 1024:
+            raise ValueError("Cloud-init user-data exceeds the conservative 16 KiB budget")
     return script
 
 
