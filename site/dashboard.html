@@ -3,248 +3,154 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Cerberus — Containment console</title>
-<meta name="description" content="Watch Cerberus run a repo's code behind glass: sub-agents find, prove, patch and re-prove vulnerabilities inside a disposable gVisor VM — and the instant anything tries to escape, it's contained. Blast radius zero.">
+<title>Cerberus</title>
+<meta name="description" content="Watch a repository's code run two VMs deep on Vultr — agents find, prove and patch its vulnerabilities, and every escape attempt stops at the isolation boundary.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
   :root{
-    --paper:#e8eae4; --paper2:#f1f2ee; --card:#fbfbf9;
-    --ink:#14160f; --ink2:#41443a; --faint:#7d8173; --line:#d0d3c9; --line2:#c1c4b8;
-    --glass:#0c0e0a; --glass2:#12140f; --gink:#e9ebe4; --gfaint:#79806e; --gline:#242820;
-    --signal:#ff5a1f; --signal-ink:#c33d0d;
-    --contained:#1f8a52; --breach:#e5342b; --vultr:#2b6bff;
-    --disp:"Archivo",-apple-system,BlinkMacSystemFont,sans-serif;
-    --sans:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,sans-serif;
+    --ink:#171a21; --ink2:#535966; --faint:#8b91a0; --line:#e5e8ee; --line2:#dbdfe7;
+    --card:#ffffff; --blue:#2f6bed; --green:#199a5b; --red:#d8402f; --amber:#c07a12;
+    --code:#0d1016; --cink:#e6e9f0; --cfaint:#7b8394;
+    --sans:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
     --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
   }
   *{box-sizing:border-box}
-  html{scroll-behavior:smooth}
-  body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);-webkit-font-smoothing:antialiased;line-height:1.5}
-  ::selection{background:rgba(255,90,31,.22)}
+  body{margin:0;color:var(--ink);font-family:var(--sans);-webkit-font-smoothing:antialiased;line-height:1.5;min-height:100vh;
+    background:
+      radial-gradient(1000px 560px at 8% -10%,#f1f0ff 0,transparent 58%),
+      radial-gradient(900px 520px at 96% 0,#e7f4f0 0,transparent 55%),
+      linear-gradient(180deg,#eef1f5,#e8ecf1);background-attachment:fixed}
   .mono{font-family:var(--mono)}
-  /* faint clean-room grid on paper */
-  body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.5;
-    background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);
-    background-size:52px 52px;mask-image:radial-gradient(ellipse 90% 70% at 50% 0,#000,transparent 80%)}
 
-  /* control bar */
-  .bar{position:sticky;top:0;z-index:40;display:flex;align-items:center;gap:14px;padding:12px 22px;
-    background:rgba(232,234,228,.86);backdrop-filter:blur(10px);border-bottom:1px solid var(--line2)}
-  .mark{display:flex;align-items:center;gap:10px;font-family:var(--disp);font-weight:800;font-size:18px;letter-spacing:-.4px;flex:0 0 auto}
-  .mark canvas{display:block}
-  .runbox{display:flex;align-items:center;gap:8px;flex:1;min-width:0;max-width:560px;background:var(--card);
-    border:1px solid var(--line2);border-radius:11px;padding:7px 8px 7px 13px}
-  .runbox .lead{font-family:var(--mono);font-size:12px;color:var(--faint);flex:0 0 auto}
-  .runbox input{flex:1;min-width:0;border:0;outline:0;background:transparent;font-family:var(--mono);font-size:13.5px;color:var(--ink)}
-  .run{flex:0 0 auto;background:var(--ink);color:var(--paper);border:0;border-radius:9px;padding:9px 18px;font-family:var(--disp);
-    font-weight:700;font-size:13.5px;cursor:pointer;transition:background .15s,transform .1s}
-  .run:hover{background:#000}.run:active{transform:translateY(1px)}.run[disabled]{opacity:.5;cursor:progress}
-  .status{margin-left:auto;display:flex;align-items:center;gap:16px;flex:0 0 auto;font-family:var(--mono);font-size:11.5px;color:var(--ink2)}
-  .status b{color:var(--ink);font-weight:600}
-  .live{display:inline-flex;align-items:center;gap:6px}
-  .live i{width:7px;height:7px;border-radius:50%;background:var(--faint)}
-  .live.on i{background:var(--contained);animation:beat 1.4s infinite}
-  @keyframes beat{0%,100%{opacity:1}50%{opacity:.35}}
-  @media(max-width:900px){.status .hide{display:none}}
-  @media(max-width:660px){.status{display:none}}
+  .top{display:flex;align-items:center;gap:12px;max-width:1360px;margin:0 auto;padding:16px 24px 4px}
+  .brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:17px;letter-spacing:-.2px}
+  .brand canvas{display:block}
+  .sub{color:var(--faint);font-size:13px;margin-left:4px}
+  @media(max-width:640px){.sub{display:none}}
 
-  /* strapline */
-  .strap{position:relative;z-index:1;max-width:1320px;margin:0 auto;padding:22px 22px 0}
-  .strap .ey{font-family:var(--mono);font-size:11px;letter-spacing:2.5px;text-transform:uppercase;color:var(--signal-ink)}
-  .strap h1{font-family:var(--disp);font-weight:800;letter-spacing:-1.4px;font-size:clamp(26px,4vw,42px);margin:8px 0 4px;line-height:1}
-  .strap p{color:var(--ink2);max-width:640px;margin:0;font-size:15px}
+  .stage{max-width:1360px;margin:0 auto;padding:10px 24px 44px;display:grid;grid-template-columns:300px 132px minmax(0,1fr);gap:0;align-items:stretch}
+  @media(max-width:900px){.stage{grid-template-columns:1fr;gap:16px}}
 
-  /* console grid */
-  .console{position:relative;z-index:1;max-width:1320px;margin:0 auto;padding:20px 22px 40px;
-    display:grid;grid-template-columns:288px minmax(0,1fr) 320px;gap:16px;align-items:start}
-  @media(max-width:1120px){.console{grid-template-columns:1fr;}}
-  .col{display:flex;flex-direction:column;gap:14px}
-  .panel{background:var(--card);border:1px solid var(--line2);border-radius:14px}
-  .phead{display:flex;align-items:center;gap:9px;padding:12px 15px;border-bottom:1px solid var(--line)}
-  .phead .t{font-family:var(--disp);font-weight:700;font-size:13px;letter-spacing:.2px}
-  .phead .n{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--faint)}
+  /* product side */
+  .product{background:var(--card);border:1px solid var(--line2);border-radius:16px;padding:18px;box-shadow:0 16px 40px -26px rgba(20,25,40,.5);
+    display:flex;flex-direction:column;z-index:2}
+  .plabel{font-family:var(--mono);font-size:10.5px;letter-spacing:2px;text-transform:uppercase;color:var(--faint)}
+  .product h2{font-size:16px;margin:4px 0 14px;font-weight:600}
+  .repo{display:flex;align-items:center;gap:7px;border:1px solid var(--line2);border-radius:10px;padding:7px 8px 7px 11px;background:#fbfcfd}
+  .repo .g{font-family:var(--mono);font-size:11px;color:var(--faint)}
+  .repo input{flex:1;min-width:0;border:0;outline:0;background:transparent;font-family:var(--mono);font-size:12.5px;color:var(--ink)}
+  .go{width:100%;margin-top:10px;background:var(--ink);color:#fff;border:0;border-radius:10px;padding:11px;font-weight:600;font-size:14px;cursor:pointer}
+  .go:hover{background:#000}.go[disabled]{opacity:.5;cursor:progress}
+  .result{margin-top:16px;border-top:1px solid var(--line);padding-top:14px;flex:1}
+  .rbig{font-size:34px;font-weight:700;letter-spacing:-1px;line-height:1}
+  .rbig small{font-size:14px;color:var(--faint);font-weight:500}
+  .rline{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink2);margin-top:12px}
+  .rline .ic{width:16px;height:16px;flex:0 0 auto}
+  .rline.pending{color:var(--faint)}
+  .rok{color:var(--green);font-weight:600}
 
-  /* agents */
-  .agent{display:flex;align-items:flex-start;gap:11px;padding:11px 15px;border-bottom:1px solid var(--line)}
-  .agent:last-child{border-bottom:0}
-  .agent . av{width:26px;height:26px;border-radius:8px;flex:0 0 auto;display:grid;place-items:center;font-family:var(--mono);
-    font-size:11px;font-weight:600;color:#fff;background:var(--ink2);opacity:.4;transition:opacity .3s}
-  .agent.on .av{opacity:1}
-  .agent .nm{font-family:var(--disp);font-weight:600;font-size:13px}
-  .agent .rl{font-size:11.5px;color:var(--faint);margin-top:1px}
-  .agent .st{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--faint);padding-top:2px;white-space:nowrap}
-  .agent.on .st{color:var(--ink2)}
-  .agent.done .st{color:var(--contained)}
+  /* connector */
+  .link{align-self:center;display:flex;align-items:center;padding:0 2px;position:relative;z-index:1}
+  .link .rail{width:42px;height:2px;background:var(--line2);position:relative}
+  .link .rail::after{content:"";position:absolute;top:-3px;width:8px;height:8px;border-radius:50%;background:var(--blue);opacity:0;box-shadow:0 0 10px var(--blue)}
+  .link.run .rail::after{animation:travel 1.1s linear infinite}
+  @keyframes travel{0%{left:-6px;opacity:0}20%{opacity:1}80%{opacity:1}100%{left:42px;opacity:0}}
+  .link .lab{position:absolute;top:-24px;left:50%;transform:translateX(-50%);white-space:nowrap;font-family:var(--mono);font-size:10px;color:var(--faint)}
+  @media(max-width:900px){.link{transform:rotate(90deg);margin:-4px auto}.link .lab{top:-20px}}
 
-  .comms{padding:6px 0;max-height:224px;overflow:auto}
-  .msg{display:flex;gap:8px;padding:5px 15px;font-size:12px;opacity:0;transform:translateY(4px);transition:all .3s}
-  .msg.show{opacity:1;transform:none}
-  .msg .from{font-family:var(--mono);font-size:10.5px;font-weight:600;flex:0 0 auto;padding-top:1px}
-  .msg .tx{color:var(--ink2)}
-  .comms::-webkit-scrollbar,.ttext::-webkit-scrollbar{width:7px}
-  .comms::-webkit-scrollbar-thumb{background:var(--line2);border-radius:7px}
+  /* backend: nested boxes */
+  .infra{position:relative;z-index:2}
+  .box{position:relative;border-radius:16px;padding:20px 16px 16px}
+  .tab{position:absolute;top:-10px;left:16px;display:inline-flex;align-items:center;gap:6px;background:var(--card);
+    border:1px solid var(--line2);border-radius:999px;padding:3px 11px;font-family:var(--mono);font-size:10.5px;font-weight:500;color:var(--ink2)}
+  .tab .d{width:6px;height:6px;border-radius:50%;background:var(--faint)}
+  .tab .d.on{background:var(--green);animation:beat 1.4s infinite}
+  @keyframes beat{50%{opacity:.4}}
+  .host{border:1px solid var(--line2);background:#f6f8fb}
+  .host>.tab .d.on{background:var(--blue)}
+  /* the isolation boundary is the gVisor VM edge */
+  .vm{border:2px solid #c4d3cb;background:#eef4f0;margin-top:6px;transition:border-color .4s,filter .8s,opacity .8s}
+  .vm.hot{border-color:var(--green)}
+  .vm.dead{filter:grayscale(.7);opacity:.55}
+  .vm>.tab{border-color:#bcd0c6}
+  .bmark{position:absolute;top:50%;right:-1px;transform:translate(50%,-50%);display:inline-flex;align-items:center;gap:6px;
+    background:#fff;border:1px solid var(--red);color:var(--red);border-radius:999px;padding:3px 10px;font-family:var(--mono);font-size:10.5px;
+    opacity:0;transition:opacity .25s;white-space:nowrap;z-index:6}
+  .bmark.show{opacity:1}
+  .agentbar{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+  .chip{display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid var(--line2);border-radius:999px;padding:4px 10px;font-size:11.5px;color:var(--faint)}
+  .chip .d{width:6px;height:6px;border-radius:50%;background:#d5d9e0}
+  .chip.on{color:var(--ink);border-color:#c9d3ea}.chip.on .d{background:var(--blue);animation:beat 1.2s infinite}
+  .chip.done{color:var(--ink2)}.chip.done .d{background:var(--green)}
+  /* untrusted code box (dark, innermost) */
+  .code{position:relative;background:var(--code);border-radius:11px;padding:12px 13px;overflow:hidden}
+  .code>.ctab{display:flex;align-items:center;gap:8px;color:var(--cfaint);font-family:var(--mono);font-size:10.5px;margin-bottom:8px}
+  .code>.ctab b{color:#ffb59a}
+  .term{font-family:var(--mono);font-size:11.5px;line-height:1.6;height:250px;overflow:auto;color:var(--cink)}
+  .term::-webkit-scrollbar{width:6px}.term::-webkit-scrollbar-thumb{background:#242a34;border-radius:6px}
+  .ln{white-space:pre-wrap;word-break:break-word;opacity:0;transition:opacity .2s}.ln.show{opacity:1}
+  .c-f{color:var(--cfaint)}.c-b{color:#ff7a6b}.c-g{color:#54d18d}.c-y{color:#ffcf6a}.c-bl{color:#78a9ff}.c-p{color:#b79bff}
+  .escape{position:absolute;width:9px;height:9px;border-radius:50%;background:var(--red);box-shadow:0 0 10px var(--red);
+    left:40%;top:60px;opacity:0;transition:transform 1s cubic-bezier(.5,0,.6,1),opacity .3s;z-index:5}
+  .vmcap{font-family:var(--mono);font-size:10.5px;color:var(--ink2);margin-top:9px;padding-left:2px;min-height:15px}
+  .vmcap .drop{color:var(--green)}
 
-  /* the glass viewport (signature) */
-  .viewport{position:relative;border-radius:16px;overflow:hidden;background:var(--glass);border:1px solid #000;
-    box-shadow:0 30px 70px -30px rgba(0,0,0,.55), inset 0 0 0 1px rgba(255,255,255,.03)}
-  .vp-top{display:flex;align-items:center;gap:10px;padding:12px 15px;border-bottom:1px solid var(--gline);color:var(--gfaint);font-family:var(--mono);font-size:12px}
-  .vp-top .dot3{display:flex;gap:6px}.dot3 i{width:10px;height:10px;border-radius:50%;display:block}
-  .dot3 .r{background:#ff5f57}.dot3 .y{background:#febc2e}.dot3 .g{background:#28c840}
-  .vp-top b{color:var(--gink)}
-  .vp-top .badge{margin-left:auto;display:inline-flex;align-items:center;gap:6px;color:var(--contained);
-    border:1px solid rgba(31,138,82,.5);border-radius:999px;padding:3px 10px;font-size:10.5px}
-  .vp-top .badge i{width:6px;height:6px;border-radius:50%;background:var(--contained);animation:beat 1.4s infinite}
-  .glassbody{position:relative;padding:14px}
-  /* nested target frame */
-  .nest{border:1px solid var(--gline);border-radius:11px;overflow:hidden;margin-top:12px;background:var(--glass2)}
-  .nest .nhead{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--gline);
-    font-family:var(--mono);font-size:11px;color:var(--gfaint)}
-  .nest .nhead b{color:#ffb59a}
-  .term{font-family:var(--mono);font-size:12px;line-height:1.62;padding:12px 14px;overflow:auto;color:var(--gink)}
-  .tterm{height:150px}.nterm{height:196px}
-  .ln{white-space:pre-wrap;word-break:break-word}
-  .g-faint{color:var(--gfaint)}.g-sig{color:#ff824f}.g-ok{color:#4fd08a}.g-bad{color:#ff6a6a}.g-blue{color:#6fa8ff}.g-warn{color:#ffce6a}.g-prompt{color:#4fd08a}
-  .cur{display:inline-block;width:7px;height:14px;background:var(--signal);vertical-align:-2px;margin-left:2px;animation:bl 1s steps(1) infinite}
-  @keyframes bl{50%{opacity:0}}
-  .viewport.dead{filter:grayscale(.85) brightness(.5);transition:filter 1s}
-  /* containment overlay */
-  .contain{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;
-    background:rgba(255,90,31,.13);backdrop-filter:blur(2px);opacity:0;pointer-events:none;transition:opacity .25s;z-index:5}
-  .contain.show{opacity:1}
-  .contain.breach{background:rgba(229,52,43,.16)}
-  .contain .big{font-family:var(--disp);font-weight:800;font-size:clamp(20px,3.4vw,34px);letter-spacing:-.5px;color:#fff;
-    text-align:center;text-shadow:0 2px 20px rgba(0,0,0,.5)}
-  .contain .sub{font-family:var(--mono);font-size:12px;color:#ffe;max-width:80%;text-align:center}
-  .contain .tape{position:absolute;left:-10%;right:-10%;height:34px;background:repeating-linear-gradient(45deg,var(--signal) 0 22px,#1a1c16 22px 44px);opacity:.9}
-  .contain.breach .tape{background:repeating-linear-gradient(45deg,var(--breach) 0 22px,#1a1c16 22px 44px)}
-  .contain .tape.top{top:26px;transform:rotate(-1.2deg)}.contain .tape.bot{bottom:26px;transform:rotate(1.2deg)}
-
-  /* ledger */
-  .radius{padding:16px 15px;text-align:center;border-bottom:1px solid var(--line)}
-  .radius .lab{font-family:var(--mono);font-size:10.5px;letter-spacing:2px;text-transform:uppercase;color:var(--faint)}
-  .radius .val{font-family:var(--disp);font-weight:800;font-size:40px;letter-spacing:-1.5px;line-height:1.1;color:var(--contained)}
-  .radius .val small{font-size:14px;color:var(--faint);font-weight:600;letter-spacing:0}
-  .ring{width:96px;height:96px;margin:6px auto 2px;position:relative}
-  .ring svg{transform:rotate(-90deg)}
-  .rmeter{stroke:var(--contained);stroke-linecap:round;transition:stroke-dashoffset .5s}
-  .ring .c{position:absolute;inset:0;display:grid;place-items:center;font-family:var(--disp);font-weight:800;font-size:22px}
-  .finds{padding:6px 0}
-  .find{display:flex;align-items:center;gap:10px;padding:9px 15px;border-bottom:1px solid var(--line);opacity:.5;transition:opacity .3s}
-  .find:last-child{border-bottom:0}.find.on{opacity:1}
-  .find .sev{width:8px;height:8px;border-radius:50%;background:var(--line2);flex:0 0 auto}
-  .find.on .sev{background:var(--breach)}
-  .find .cl{font-family:var(--mono);font-size:12px}
-  .find .stg{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--faint);padding:2px 7px;border-radius:6px;border:1px solid var(--line2)}
-  .find .stg.conf{color:var(--signal-ink);border-color:rgba(255,90,31,.4);background:rgba(255,90,31,.07)}
-  .find .stg.cert{color:var(--contained);border-color:rgba(31,138,82,.4);background:rgba(31,138,82,.07)}
-  .evi{padding:12px 15px;border-top:1px solid var(--line)}
-  .evi .k{font-family:var(--mono);font-size:10.5px;letter-spacing:1.5px;text-transform:uppercase;color:var(--faint);margin-bottom:6px}
-  .evi .log{font-family:var(--mono);font-size:10.5px;color:var(--ink2);background:var(--paper2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;line-height:1.5;word-break:break-all}
-  .evi .row{display:flex;justify-content:space-between;font-family:var(--mono);font-size:12px;padding:4px 0;color:var(--ink2)}
-  .evi .row b{color:var(--ink)}
-
-  footer{position:relative;z-index:1;max-width:1320px;margin:0 auto;padding:22px;color:var(--faint);font-size:12px;font-family:var(--mono);
-    display:flex;gap:14px;flex-wrap:wrap;border-top:1px solid var(--line2)}
-  footer a{color:var(--ink);text-decoration:none;border-bottom:1px solid var(--line2)}
-  @media(prefers-reduced-motion:reduce){*{animation-duration:.001s!important;transition-duration:.08s!important}}
+  .foot{max-width:1360px;margin:0 auto;padding:2px 24px 40px;display:flex;gap:14px;align-items:center;font-family:var(--mono);font-size:11.5px;color:var(--faint)}
+  .foot b{color:var(--ink2)}.foot a{color:var(--ink2);text-decoration:none;border-bottom:1px solid var(--line2)}
+  @media(prefers-reduced-motion:reduce){*{animation-duration:.001s!important;transition-duration:.1s!important}}
 </style>
 </head>
 <body>
-<div class="bar">
-  <div class="mark"><canvas id="mk" width="30" height="30"></canvas> Cerberus</div>
-  <div class="runbox">
-    <span class="lead">scan</span>
-    <input id="repo" value="github.com/seeded/vulnerable-shop" spellcheck="false" aria-label="Repository to scan">
-    <button class="run" id="run">Run</button>
+  <div class="top">
+    <div class="brand"><canvas id="mk" width="26" height="26"></canvas> Cerberus</div>
+    <span class="sub">run a repo two VMs deep on Vultr — watch nothing get out</span>
   </div>
-  <div class="status">
-    <span class="hide">reasoning <b>deepseek-v4-flash</b> · Vultr</span>
-    <span class="hide">region <b>ord</b></span>
-    <span class="live" id="live"><i></i> <span id="live-t">idle</span></span>
-  </div>
-</div>
 
-<div class="strap">
-  <div class="ey">Containment console</div>
-  <h1>Run a stranger's code. Watch nothing escape.</h1>
-  <p>Cerberus dispatches the repository into a disposable gVisor VM, turns sub-agents loose to find and prove real vulnerabilities, patches them, and re-proves the fix — and the moment anything reaches for the host, it's contained.</p>
-</div>
-
-<div class="console">
-  <!-- LEFT: agents + comms -->
-  <div class="col">
-    <div class="panel">
-      <div class="phead"><span class="t">Agents</span><span class="n" id="agent-n">5 idle</span></div>
-      <div id="agents">
-        <div class="agent" data-a="recon"><div class="av" style="background:#5b6ee0">RC</div><div><div class="nm">Recon</div><div class="rl">maps routes &amp; inputs</div></div><div class="st">idle</div></div>
-        <div class="agent" data-a="static"><div class="av" style="background:#7a5be0">ST</div><div><div class="nm">Static sweep</div><div class="rl">flags candidate sinks</div></div><div class="st">idle</div></div>
-        <div class="agent" data-a="triage"><div class="av" style="background:#2b6bff">TR</div><div><div class="nm">Triage</div><div class="rl">Vultr inference · ranks</div></div><div class="st">idle</div></div>
-        <div class="agent" data-a="exploit"><div class="av" style="background:#e5342b">EX</div><div><div class="nm">Exploit</div><div class="rl">fires tools · canary oracle</div></div><div class="st">idle</div></div>
-        <div class="agent" data-a="patch"><div class="av" style="background:#ff5a1f">PA</div><div><div class="nm">Patch + review</div><div class="rl">writes fix · 2nd model checks</div></div><div class="st">idle</div></div>
+  <div class="stage">
+    <!-- PRODUCT / user side -->
+    <div class="product">
+      <div class="plabel">You</div>
+      <h2>Scan a repository</h2>
+      <div class="repo"><span class="g">github.com/</span><input id="repo" value="seeded/vulnerable-shop" spellcheck="false" aria-label="Repository"></div>
+      <button class="go" id="run">Run scan</button>
+      <div class="result">
+        <div class="rbig"><span id="fixed">0</span><small> / <span id="found">0</span> fixed</small></div>
+        <div class="rline pending" id="r1"><span class="ic">◔</span> waiting to run</div>
+        <div class="rline pending" id="r2"><span class="ic">◔</span> nothing left your machine</div>
       </div>
-      <div class="phead" style="border-top:1px solid var(--line)"><span class="t">Comms</span><span class="n">agent → agent</span></div>
-      <div class="comms" id="comms"><div class="msg show"><span class="tx g-faint" style="color:var(--faint);padding-left:15px">idle — press Run</span></div></div>
     </div>
-  </div>
 
-  <!-- CENTER: the glass -->
-  <div class="col">
-    <div class="viewport" id="vp">
-      <div class="vp-top"><span class="dot3"><i class="r"></i><i class="y"></i><i class="g"></i></span>
-        <span>SANDBOX-01 · <b>gVisor / runsc</b> · disposable VX1</span>
-        <span class="badge" id="vp-badge" style="opacity:0"><i></i> contained</span></div>
-      <div class="glassbody">
-        <div class="term tterm" id="host"><span class="ln g-faint">// disposable VM — awaiting dispatch over the private network</span></div>
-        <div class="nest">
-          <div class="nhead">↳ target runtime · <b id="nest-name">seeded/vulnerable-shop</b> · sandboxed process</div>
-          <div class="term nterm" id="target"><span class="ln g-faint">// the repository's own code runs here, behind the glass</span></div>
-        </div>
-        <div class="contain" id="contain">
-          <div class="tape top"></div>
-          <div class="big" id="contain-big">CONTAINED</div>
-          <div class="sub" id="contain-sub"></div>
-          <div class="tape bot"></div>
+    <!-- connector -->
+    <div class="link" id="link"><div class="rail"></div><span class="lab">dispatch · private network</span></div>
+
+    <!-- BACKEND / infrastructure -->
+    <div class="infra">
+      <div class="box host"><span class="tab"><span class="d" id="d-host"></span> Vultr · VX1 · sandbox host</span>
+        <div class="box vm" id="vm"><span class="tab"><span class="d" id="d-vm"></span> disposable VM · gVisor / runsc · own kernel</span>
+          <span class="bmark" id="bmark">⊘ escape blocked at the boundary</span>
+          <div class="agentbar">
+            <span class="chip" data-c="recon"><span class="d"></span> recon</span>
+            <span class="chip" data-c="triage"><span class="d"></span> triage · Vultr</span>
+            <span class="chip" data-c="exploit"><span class="d"></span> exploit</span>
+            <span class="chip" data-c="patch"><span class="d"></span> patch</span>
+            <span class="chip" data-c="review"><span class="d"></span> review · 2nd model</span>
+          </div>
+          <div class="code">
+            <div class="ctab">↳ <b id="codename">seeded/vulnerable-shop</b> · the repo's own code, untrusted</div>
+            <div class="term" id="term"><span class="ln show c-f">// idle — the repository's code runs in here</span></div>
+            <span class="escape" id="escape"></span>
+          </div>
+          <div class="vmcap" id="vmcap"></div>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- RIGHT: ledger -->
-  <div class="col">
-    <div class="panel">
-      <div class="radius">
-        <div class="ring"><svg width="96" height="96" viewBox="0 0 96 96">
-          <circle cx="48" cy="48" r="40" fill="none" stroke="var(--line)" stroke-width="8"/>
-          <circle id="rmeter" class="rmeter" cx="48" cy="48" r="40" fill="none" stroke-width="8" stroke-dasharray="251.3" stroke-dashoffset="0"/>
-        </svg><div class="c" id="ring-c">0</div></div>
-        <div class="lab">blast radius</div>
-        <div class="val" id="radius-val">ZERO</div>
-      </div>
-      <div class="phead"><span class="t">Findings</span><span class="n"><b id="cert-n" style="color:var(--contained)">0</b>/5 certified</span></div>
-      <div class="finds" id="finds">
-        <div class="find" data-f="sqli"><span class="sev"></span><span class="cl">sql injection</span><span class="stg">—</span></div>
-        <div class="find" data-f="path_traversal"><span class="sev"></span><span class="cl">path traversal</span><span class="stg">—</span></div>
-        <div class="find" data-f="command_injection"><span class="sev"></span><span class="cl">command injection</span><span class="stg">—</span></div>
-        <div class="find" data-f="ssrf"><span class="sev"></span><span class="cl">ssrf</span><span class="stg">—</span></div>
-        <div class="find" data-f="auth_bypass"><span class="sev"></span><span class="cl">auth bypass / idor</span><span class="stg">—</span></div>
-      </div>
-      <div class="evi">
-        <div class="k">Enforcement evidence</div>
-        <div class="log" id="klog">awaiting kernel drop log…</div>
-        <div class="row"><span>host DROP counter</span><b id="drop">+0</b></div>
-        <div class="row"><span>disposable instance</span><b id="tear">running</b></div>
-      </div>
-    </div>
-  </div>
-</div>
-
-<footer>
-  <span>Cerberus · blast radius zero</span>
-  <span style="margin-left:auto">Vultr VX1 + Serverless Inference · gVisor / OpenSandbox</span>
-  <a href="https://github.com/Preet37/VultrHack" target="_blank" rel="noopener">source</a>
-</footer>
+  <div class="foot"><span>isolation: gVisor + private network · <b>blast radius 0</b></span>
+    <span style="margin-left:auto">Vultr VX1 + Serverless Inference</span>
+    <a href="https://github.com/Preet37/VultrHack" target="_blank" rel="noopener">source</a></div>
 
 <script>
 (function(){
@@ -252,128 +158,88 @@
   var $=function(s,r){return (r||document).querySelector(s)};
   var sleep=function(ms){return new Promise(function(r){setTimeout(r,ms)})};
 
-  /* Cerberus mark: three heads, one guard */
-  (function(){var c=$('#mk');if(!c)return;var x=c.getContext('2d'),w=30,h=30,t=0;
-    var P=[[15,7],[7,22],[23,22]],col=['#ff5a1f','#2b6bff','#1f8a52'];
-    (function f(){x.clearRect(0,0,w,h);t+=.03;x.strokeStyle='rgba(20,22,15,.5)';x.lineWidth=1.4;
+  (function(){var c=$('#mk');if(!c)return;var x=c.getContext('2d'),t=0,P=[[13,6],[6,19],[20,19]],col=['#2f6bed','#199a5b','#b79bff'];
+    (function f(){x.clearRect(0,0,26,26);t+=.03;x.strokeStyle='rgba(23,26,33,.32)';x.lineWidth=1.3;
       x.beginPath();x.moveTo(P[0][0],P[0][1]);x.lineTo(P[1][0],P[1][1]);x.lineTo(P[2][0],P[2][1]);x.closePath();x.stroke();
-      for(var i=0;i<3;i++){x.beginPath();x.fillStyle=col[i];x.arc(P[i][0],P[i][1],3.3+.5*Math.sin(t+i*2),0,7);x.fill();}
-      x.beginPath();x.fillStyle='#14160f';x.arc(15,16,2,0,7);x.fill();requestAnimationFrame(f);})();})();
+      for(var i=0;i<3;i++){x.beginPath();x.fillStyle=col[i];x.arc(P[i][0],P[i][1],2.9+.4*Math.sin(t+i*2),0,7);x.fill();}
+      x.beginPath();x.fillStyle='#171a21';x.arc(13,14,1.7,0,7);x.fill();requestAnimationFrame(f);})();})();
 
-  var host=$('#host'), target=$('#target'), comms=$('#comms');
-  function line(term,cls,txt){
-    return new Promise(function(res){
-      var l=document.createElement('div');l.className='ln '+(cls||'');l.textContent=txt;
-      l.style.opacity='0';l.style.transition='opacity .12s';term.appendChild(l);term.scrollTop=term.scrollHeight;
-      requestAnimationFrame(function(){l.style.opacity='1';});
-      setTimeout(res,Math.min(46+txt.length*1.7,150));
-    });
-  }
-  function say(from,color,txt){
-    return new Promise(function(res){
-      var m=document.createElement('div');m.className='msg';
-      m.innerHTML='<span class="from" style="color:'+color+'">'+from+'</span><span class="tx">'+txt+'</span>';
-      comms.appendChild(m);comms.scrollTop=comms.scrollHeight;
-      requestAnimationFrame(function(){m.classList.add('show');});
-      setTimeout(res,Math.min(60+txt.length*1.4,170));
-    });
-  }
-  function agent(a,state,st){var n=document.querySelector('.agent[data-a="'+a+'"]');if(!n)return;
-    n.classList.remove('on','done');if(state)n.classList.add(state);if(st)n.querySelector('.st').textContent=st;}
-  function findStage(f,cls,txt){var n=document.querySelector('.find[data-f="'+f+'"]');if(!n)return;
-    n.classList.add('on');var s=n.querySelector('.stg');s.textContent=txt;s.className='stg'+(cls?' '+cls:'');}
-  function live(state,txt){$('#live').classList.toggle('on',!!state);$('#live-t').textContent=txt;}
-
-  // The blast-radius ring stays at ZERO the whole run -- that is the point. Only
-  // the certified tally in the Findings header advances.
-  function ringCount(n){$('#cert-n').textContent=n;}
+  var term=$('#term');
+  function line(cls,txt){return new Promise(function(res){var d=document.createElement('div');d.className='ln '+(cls||'');d.textContent=txt;
+    term.appendChild(d);term.scrollTop=term.scrollHeight;requestAnimationFrame(function(){d.classList.add('show');});
+    setTimeout(res,Math.min(44+txt.length*1.6,150));});}
+  function chip(c,st){var n=document.querySelector('.chip[data-c="'+c+'"]');if(!n)return;n.classList.remove('on','done');if(st)n.classList.add(st);}
+  function rline(el,ok,txt){var n=$(el);n.classList.toggle('pending',!ok);n.querySelector('.ic').textContent=ok?'✓':'◔';
+    if(ok)n.querySelector('.ic').style.color='var(--green)';n.lastChild.textContent=' '+txt;}
 
   var VULNS=[
-    {f:'sqli',cl:'sql injection',ep:'GET /product?id=',can:'CANARY-a1b2c3d4…',sink:'string-built SQL → execute()',fix:'parameterized query'},
-    {f:'path_traversal',cl:'path traversal',ep:'GET /download?file=',can:'FILECANARY-9f8e7d6c…',sink:'unchecked path → open()',fix:'reject ../, resolve in base'},
-    {f:'command_injection',cl:'command injection',ep:'GET /net?host=',can:'FILECANARY-9f8e7d6c…',sink:'input → shell=True',fix:'argv list, shell off'},
-    {f:'ssrf',cl:'ssrf',ep:'GET /fetch?url=',can:'SSRFCANARY-0f1e2d3c…',sink:'attacker URL → urlopen()',fix:'allowlist host, block private'},
-    {f:'auth_bypass',cl:'auth bypass / idor',ep:'GET /account?id=',can:'ACCTCANARY-1a2b3c4d…',sink:'object by client id, no owner check',fix:'enforce caller owns object'}
+    {f:'sql injection',ep:'/product?id',can:'CANARY-a1b2c3d4…',fix:'parameterized query'},
+    {f:'path traversal',ep:'/download?file',can:'FILECANARY-9f8e7d6c…',fix:"reject '..' · resolve in base"},
+    {f:'command injection',ep:'/net?host',can:'FILECANARY-9f8e7d6c…',fix:'argv list · shell off'},
+    {f:'ssrf',ep:'/fetch?url',can:'SSRFCANARY-0f1e2d3c…',fix:'block private/loopback · 403'},
+    {f:'auth bypass / idor',ep:'/account?id',can:'ACCTCANARY-1a2b3c4d…',fix:'enforce object owner'}
   ];
-  var KLOG='cerberus-os-drop IN=br-56c2c6d718aa SRC=172.18.0.2 DST=172.18.0.1 PROTO=TCP DPT=65000 SYN';
 
-  async function containEvent(breach,big,sub){
-    var c=$('#contain');c.classList.toggle('breach',!!breach);
-    $('#contain-big').textContent=big;$('#contain-sub').textContent=sub;
-    c.classList.add('show');await sleep(2400);c.classList.remove('show');await sleep(300);
+  async function blockedEscape(){
+    // a probe from inside the code tries to reach the host; it stops at the gVisor boundary
+    var e=$('#escape');e.style.transition='none';e.style.transform='none';e.style.opacity='0';e.style.left='38%';e.style.top='64px';
+    // force reflow then animate toward the right edge (the boundary)
+    void e.offsetWidth;e.style.transition='transform 1s cubic-bezier(.5,0,.6,1),opacity .3s';
+    e.style.opacity='1';e.style.transform='translate(240px,-30px)';
+    await sleep(950);
+    $('#bmark').classList.add('show');e.style.opacity='0';
+    $('#vmcap').innerHTML='<span class="drop">kernel DROP +2</span> · cerberus-os-drop DPT=65000 · nothing reached the host';
+    await sleep(1400);$('#bmark').classList.remove('show');
   }
 
   var running=false;
   async function run(){
-    if(running)return;running=true;
-    var btn=$('#run');btn.disabled=true;btn.textContent='Running';
-    host.innerHTML='';target.innerHTML='';comms.innerHTML='';
-    document.querySelectorAll('.find').forEach(function(n){n.classList.remove('on');var s=n.querySelector('.stg');s.textContent='—';s.className='stg';});
-    ringCount(0);$('#drop').textContent='+0';$('#tear').textContent='running';$('#klog').textContent='awaiting kernel drop log…';
-    $('#vp').classList.remove('dead');$('#vp-badge').style.opacity='0';
-    var repo=($('#repo').value||'seeded/vulnerable-shop').replace(/^https?:\/\/(github\.com\/)?/,'');
-    $('#nest-name').textContent=repo;
-    live(true,'dispatching');
+    if(running)return;running=true;$('#run').disabled=true;$('#run').textContent='Running…';
+    term.innerHTML='';$('#vmcap').textContent='';$('#bmark').classList.remove('show');$('#vm').classList.remove('dead');
+    ['recon','triage','exploit','patch','review'].forEach(function(c){chip(c,'');});
+    $('#fixed').textContent='0';$('#found').textContent='0';
+    rline('#r1',false,'dispatching to a disposable VM…');rline('#r2',false,'nothing left your machine');
+    var repo=($('#repo').value||'seeded/vulnerable-shop');$('#codename').textContent=repo;
+    $('#d-host').classList.add('on');$('#link').classList.add('run');
+    await sleep(700);
+    $('#d-vm').classList.add('on');$('#vm').classList.add('hot');
+    await line('c-f','$ boot disposable VM · gVisor default runtime');
+    await line('c-g','✓ own kernel · /dev/kvm · 4.19.0-gvisor · exit 0');
 
-    // agents wake + recon/triage comms
-    agent('recon','on','reading');
-    await say('recon','#5b6ee0','cloning '+repo+' → mapping the attack surface');
-    await line(host,'g-prompt','$ cerberus dispatch '+repo+' → sandbox-01 (private network)');
-    await line(host,'g-faint','booting disposable VX1 · gVisor default runtime');
-    await say('recon','#5b6ee0','7 routes, 5 input params · handing to static sweep');
-    agent('recon','done','7 routes');agent('static','on','scanning');
-    await line(host,'g-ok','✓ CPU virt svm · /dev/kvm r/w · runtime=runsc');
-    await say('static','#7a5be0','12 candidate sinks flagged across app.py');
-    agent('static','done','12 sinks');agent('triage','on','ranking');
-    await say('triage','#2b6bff','ranking on Vultr inference · 5 reach ≥ confidence 7');
-    await line(target,'g-faint','target runtime up · seeded canaries planted');
-    agent('triage','done','5 to test');
-    $('#vp-badge').style.opacity='1';
-    live(true,'exploiting');
+    chip('recon','on');await line('c-f','recon: mapping routes & inputs');chip('recon','done');
+    await line('c-f','  7 routes · 5 inputs');
+    chip('triage','on');await line('c-bl','triage (Vultr deepseek): 5 sinks reach ≥ confidence 7');chip('triage','done');
 
-    // per-vuln: exploit → patch → review → certify
-    var certified=0;
+    var found=0,fixed=0;
     for(var i=0;i<VULNS.length;i++){var v=VULNS[i];
-      agent('exploit','on','firing');
-      await say('exploit','#e5342b','● '+v.cl+' — '+v.ep);
-      await line(target,'g-bad','exploit → '+v.sink);
-      await line(target,'g-sig','CANARY '+v.can+' left the box — confirmed');
-      findStage(v.f,'conf','confirmed');
-      agent('exploit','done','proven');agent('patch','on','patching');
-      await say('patch','#ff5a1f','writing fix: '+v.fix);
-      await line(target,'g-warn','patch applied on a disposable copy → replaying exploit');
-      await line(target,'g-blue','re-exploit + mutations → blocked · canary gone');
-      await say('patch','#1f8a52','2nd model (independent) agrees: closed, no over-block');
-      findStage(v.f,'cert','certified');
-      certified++;ringCount(certified);
-      await sleep(90);
+      chip('exploit','on');
+      await line('c-b','● '+v.f+'  '+v.ep);
+      await line('c-f','  canary '+v.can+' left the box → confirmed');
+      found++;$('#found').textContent=found;rline('#r1',false,found+' vulnerabilities found…');
+      chip('exploit','done');chip('patch','on');
+      await line('c-y','  patch → '+v.fix+' · re-exploit blocked');
+      chip('patch','done');chip('review','on');
+      await line('c-g','  2nd model (independent): closed, no over-block ✓ certified');
+      chip('review','done');
+      fixed++;$('#fixed').textContent=fixed;
+      await sleep(80);
     }
-    agent('patch','done','5 certified');
+    rline('#r1',true,found+' vulnerabilities found and fixed');
 
-    // signature: escape attempt contained
-    live(true,'containment');
-    agent('exploit','on','probing');
-    await say('exploit','#e5342b','isolation probe → reaching for host gateway 172.18.0.1');
-    await line(host,'g-faint','probe → 192.0.2.1:65000 (reserved) · host gateway');
-    await containEvent(false,'⚠ ESCAPE CONTAINED','bridge-scoped kernel DROP · nothing reached the host');
-    await line(host,'g-sig','BLOCKED — iptables DROP (+2)');
-    await line(host,'g-faint',KLOG);
-    $('#klog').textContent=KLOG;$('#drop').textContent='+2';
-    agent('exploit','done','contained');
+    // the untrusted code tries to escape — contained at the boundary
+    chip('exploit','on');
+    await line('c-b','probe → reaching for host gateway 172.18.0.1');
+    await blockedEscape();
+    await line('c-bl','blocked at the gVisor boundary · nothing escaped');
+    chip('exploit','done');
 
-    // breach → contained → teardown
-    await say('exploit','#e5342b','planted secret spotted moving toward egress');
-    await containEvent(true,'⚠ CANARY LEAK → SEALED','the sandbox is destroyed the instant a secret moves');
-    await line(host,'g-ok','sandbox destroyed · instance 011fa7ef… → 404 · 0 remain');
-    $('#tear').textContent='404 · destroyed';
-    $('#vp').classList.add('dead');$('#vp-badge').style.opacity='0';
-    await line(host,'g-prompt','$ done — 5 confirmed · 5 certified · blast radius zero');
-    live(false,'complete · 0 escaped');
-    $('#agent-n').textContent='complete';
-    btn.disabled=false;btn.textContent='Run again';running=false;
+    await line('c-f','sandbox destroyed · instance …→ 404 · 0 remain');
+    $('#vm').classList.add('dead');$('#d-vm').classList.remove('on');$('#d-host').classList.remove('on');$('#link').classList.remove('run');
+    rline('#r2',true,'nothing left your machine');
+    $('#run').disabled=false;$('#run').textContent='Run again';running=false;
   }
   $('#run').addEventListener('click',run);
-  setTimeout(run,600);
+  setTimeout(run,500);
 })();
 </script>
 </body>
