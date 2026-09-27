@@ -431,7 +431,12 @@ class VultrInstances:
             if not isinstance(vpc_ids, (list, tuple)) or len(vpc_ids) != 1:
                 raise ValueError("Exactly one VPC ID is required for a disposable host")
             payload["attach_vpc"] = [validated_vpc_id(vpc_ids[0])]
-        response = await self.client.post(API_URL, headers=self.headers, json=payload)
+        response = None
+        for attempt in range(3):
+            response = await self.client.post(API_URL, headers=self.headers, json=payload)
+            if response.status_code not in (429,) and response.status_code < 500:
+                break
+            await asyncio.sleep(5 * (attempt + 1))
         if response.status_code == 400:
             detail = str(response.json().get("error", "Invalid instance parameters"))
             for secret in (self.headers["Authorization"][7:], payload["user_data"], *secrets_to_redact):
