@@ -37,7 +37,10 @@ from finder.patchers import _find_function, patch_source
 from finder.playbooks import confirmer_for
 from finder.recon import canaries_for, load_manifest
 
-_BENIGN = {"sqli": "1", "path_traversal": "readme.txt"}
+# A legitimate input per class whose request must still succeed after the patch.
+# SSRF is omitted deliberately: there is no in-sandbox benign fetch to make (no
+# egress), so functional parity for it is not asserted here.
+_BENIGN = {"sqli": "1", "path_traversal": "readme.txt", "command_injection": "localhost", "auth_bypass": "1"}
 
 
 def _sink_symbol(finding: Finding) -> str:
@@ -180,6 +183,30 @@ def _validate(finding: Finding, sink_symbol: str, new_source: str) -> tuple[bool
             if rejects and exits:
                 return True, "guard rejecting '..'/absolute paths is present before the file sink"
         return False, "no path-traversal guard found"
+    if finding.vuln_class == "command_injection":
+        for node in ast.walk(fn):
+            if (
+                isinstance(node, ast.Call)
+                and any(kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value is True for kw in node.keywords)
+            ):
+                return False, "a shell=True subprocess call still remains"
+        return True, "no shell=True subprocess call remains; command uses an argument list"
+    if finding.vuln_class == "ssrf":
+        # Require a resolve-based guard (blocks uppercase/encoded/private hosts),
+        # not just a loopback-literal string check.
+        for node in ast.walk(fn):
+            if isinstance(node, ast.If):
+                test_seg = ast.get_source_segment(new_source, node.test) or ""
+                exits = any(isinstance(b, (ast.Return, ast.Raise)) for b in ast.walk(node))
+                if exits and "is_private" in test_seg and "is_loopback" in test_seg:
+                    return True, "guard resolves the host and blocks loopback/private/link-local ranges"
+        return False, "no resolve-based SSRF guard found"
+    if finding.vuln_class == "auth_bypass":
+        for node in ast.walk(fn):
+            if isinstance(node, ast.If) and any(isinstance(b, (ast.Return, ast.Raise)) for b in ast.walk(node)):
+                if "403" in (ast.get_source_segment(new_source, node) or ""):
+                    return True, "ownership guard returning 403 is present"
+        return False, "no ownership check found"
     return True, "no static validator for this class yet"
 
 

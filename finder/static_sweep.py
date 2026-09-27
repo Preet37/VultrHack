@@ -95,11 +95,47 @@ class _Visitor(ast.NodeVisitor):
 
     def visit_FunctionDef(self, node: ast.FunctionDef):  # noqa: N802
         self._scan_function(node)
+        self._scan_auth_bypass(node)
         self.generic_visit(node)
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef):  # noqa: N802
         self._scan_function(node)
+        self._scan_auth_bypass(node)
         self.generic_visit(node)
+
+    def _scan_auth_bypass(self, fn: ast.AST):
+        # Auth bypass / IDOR is not sink-based: flag a handler that reads a caller
+        # identity AND a separate request-controlled object id. Over-flagging is
+        # safe -- the canary oracle rejects any hit where another user's secret
+        # does not actually come back.
+        fn_src = ast.get_source_segment(self.source, fn) or ""
+        if not any(m in fn_src for m in ("request.headers", "session", "current_user", "g.user")):
+            return
+        for sub in ast.walk(fn):
+            # Only query-string reads (args/values), which the confirmer can fire
+            # at as ?id=. Path-parameter IDOR (view_args) is not confirmable yet,
+            # so we do not flag what we cannot prove.
+            if (
+                isinstance(sub, ast.Call)
+                and _dotted(sub.func).endswith(("args.get", "values.get"))
+                and sub.args
+                and isinstance(sub.args[0], ast.Constant)
+            ):
+                self._counter += 1
+                fn_name = getattr(fn, "name", "?")
+                self.candidates.append(
+                    Candidate(
+                        id=f"{Path(self.path).stem}-{fn_name}-{self._counter}",
+                        vuln_class="auth_bypass",
+                        sink_file=self.path,
+                        sink_line=getattr(sub, "lineno", 0),
+                        sink_symbol=fn_name,
+                        snippet=ast.get_source_segment(self.source, sub) or "",
+                        input_source=f"query:{sub.args[0].value}",
+                        slice=fn_src,
+                    )
+                )
+                return
 
     def _scan_function(self, fn: ast.AST):
         # 1) taint pass: names assigned from a tainted expression.

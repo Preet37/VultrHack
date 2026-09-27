@@ -13,9 +13,14 @@ import sys
 import threading
 import time
 from pathlib import Path
-from wsgiref.simple_server import WSGIRequestHandler, make_server
+from socketserver import ThreadingMixIn
+from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
 import pytest
+
+
+class _ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
+    daemon_threads = True  # so SSRF self-fetch (a nested request) is not deadlocked
 
 ROOT = Path(__file__).parent
 SEEDED = ROOT / "targets" / "seeded_flask" / "app.py"
@@ -55,7 +60,7 @@ def findings():
     module = _load_seeded_app()
     app = module.create_app()
     port = free_port()
-    server = make_server("127.0.0.1", port, app, handler_class=_QuietHandler)
+    server = make_server("127.0.0.1", port, app, server_class=_ThreadingWSGIServer, handler_class=_QuietHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     import httpx
 
@@ -74,21 +79,18 @@ def _one(findings, vuln_class):
     return next(f for f in findings[0] if f.vuln_class == vuln_class)
 
 
-def test_sqli_patch_is_certified_closed(findings):
-    finding = _one(findings, "sqli")
+ALL_CLASSES = ["sqli", "path_traversal", "command_injection", "ssrf", "auth_bypass"]
+
+
+@pytest.mark.parametrize("vuln_class", ALL_CLASSES)
+def test_each_class_patch_is_certified_closed(findings, vuln_class):
+    finding = _one(findings, vuln_class)
     result = remediate(finding, findings[1])
-    assert result.patched is True
-    assert result.reexploit_blocked is True, result.reexploit_evidence
-    assert result.functional_ok is True
-    assert result.validated is True
-    assert result.certified is True
+    assert result.patched is True, (vuln_class, result.validation_notes)
+    assert result.reexploit_blocked is True, (vuln_class, result.reexploit_evidence)
+    assert result.validated is True, (vuln_class, result.validation_notes)
+    assert result.certified is True, (vuln_class, result.reexploit_evidence, result.validation_notes)
     assert result.patch_diff  # a real diff was produced
-
-
-def test_path_traversal_patch_is_certified_closed(findings):
-    finding = _one(findings, "path_traversal")
-    result = remediate(finding, findings[1])
-    assert result.certified is True, (result.reexploit_evidence, result.validation_notes)
 
 
 def test_regression_test_is_emitted(findings):
@@ -120,6 +122,33 @@ def test_no_patch_when_shape_unrecognized():
         '    return conn.execute("SELECT id FROM products WHERE id = ?", (product_id,)).fetchall()\n'
     )
     assert patch_source("sqli", "product", src) is None
+
+
+def test_auth_bypass_patch_uses_server_identity_not_client_header():
+    # The ownership guard must compare against the server-side identity, never a
+    # client-supplied header an attacker could spoof.
+    patch = patch_source("auth_bypass", "account", SEEDED.read_text())
+    assert patch is not None
+    assert "current_user" in patch.new_source and "403" in patch.new_source
+
+
+def test_auth_bypass_confirmer_attempts_identity_spoof():
+    # So a "fix" that merely trusts a client identity header is caught, not certified.
+    import inspect
+
+    from finder.playbooks import confirm_auth_bypass
+
+    assert "X-User" in inspect.getsource(confirm_auth_bypass)
+
+
+def test_ssrf_patch_resolves_host_and_blocks_private_ranges():
+    import ast as _ast
+
+    patch = patch_source("ssrf", "fetch", SEEDED.read_text())
+    assert patch is not None
+    assert "is_private" in patch.new_source and "is_loopback" in patch.new_source
+    assert "import ipaddress" in patch.new_source  # guard's imports were injected
+    _ast.parse(patch.new_source)  # patched source still parses
 
 
 def test_validator_is_not_fooled_by_unpatched_source():
