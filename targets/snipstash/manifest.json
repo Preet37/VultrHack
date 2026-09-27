@@ -1,0 +1,31 @@
+{
+  "name": "snipstash",
+  "language": "python",
+  "framework": "flask",
+  "entrypoint": "app.py",
+  "base_url_env": "TARGET_URL",
+  "canary": "VAULTCANARY-11223344aabbccdd-DO-NOT-EXFIL",
+  "canary_env": "CERBERUS_CANARY",
+  "file_canary": "FILECANARY-snip-556677-DO-NOT-READ",
+  "file_canary_env": "CERBERUS_FILE_CANARY",
+  "note_canary": "NOTECANARY-99887766-PRIVATE",
+  "note_canary_env": "CERBERUS_NOTE_CANARY",
+  "ssrf_canary": "SSRFCANARY-snip-abcdef-INTERNAL",
+  "ssrf_canary_env": "CERBERUS_SSRF_CANARY",
+  "routes": [
+    {"method": "GET", "path": "/", "inputs": []},
+    {"method": "GET", "path": "/health", "inputs": []},
+    {"method": "GET", "path": "/snippet", "inputs": [{"name": "id", "source": "query"}]},
+    {"method": "GET", "path": "/raw", "inputs": [{"name": "path", "source": "query"}]},
+    {"method": "GET", "path": "/diag", "inputs": [{"name": "target", "source": "query"}]},
+    {"method": "GET", "path": "/preview", "inputs": [{"name": "src", "source": "query"}]},
+    {"method": "GET", "path": "/note", "inputs": [{"name": "id", "source": "query"}]}
+  ],
+  "planted_bugs": [
+    {"id": "sqli-snippet-id", "class": "sqli", "endpoint": "/snippet", "param": "id", "sink_symbol": "snippet", "canary_path": "vault.token"},
+    {"id": "path-traversal-raw-path", "class": "path_traversal", "endpoint": "/raw", "param": "path", "sink_symbol": "raw", "canary_path": "app_secret.txt via ../"},
+    {"id": "command-injection-diag-target", "class": "command_injection", "endpoint": "/diag", "param": "target", "sink_symbol": "diag", "canary_path": "app_secret.txt via '; cat'"},
+    {"id": "ssrf-preview-src", "class": "ssrf", "endpoint": "/preview", "param": "src", "sink_symbol": "preview", "canary_path": "/internal/metadata"},
+    {"id": "auth-bypass-note-id", "class": "auth_bypass", "endpoint": "/note", "param": "id", "sink_symbol": "note", "canary_path": "notes.body of another user"}
+  ]
+}

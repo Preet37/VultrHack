@@ -144,10 +144,15 @@ def _functional_ok(finding: Finding, base: str, canaries: list[str], timeout: fl
             resp = client.get(f"{base}{finding.endpoint}", params={finding.param: benign})
     except httpx.HTTPError:
         return False
-    if resp.status_code != 200 or first_match(canaries, resp.text):
+    if first_match(canaries, resp.text):
         return False
+    if finding.vuln_class == "path_traversal":
+        # A legitimate (non-traversal) filename must not be rejected by the guard.
+        # It may still 404 if that file does not exist on this target; only a 403
+        # (the guard's own rejection) means the patch over-blocks.
+        return resp.status_code != 403
     low = resp.text.lower()
-    return "traceback" not in low and "query error" not in low
+    return resp.status_code == 200 and "traceback" not in low and "query error" not in low
 
 
 def _validate(finding: Finding, sink_symbol: str, new_source: str) -> tuple[bool, str]:

@@ -24,6 +24,8 @@ class _ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
 
 ROOT = Path(__file__).parent
 SEEDED = ROOT / "targets" / "seeded_flask" / "app.py"
+SNIP = ROOT / "targets" / "snipstash" / "app.py"
+TARGETS = [str(SEEDED.parent), str(SNIP.parent)]
 
 pytest.importorskip("flask", reason="target app needs Flask installed")
 
@@ -42,10 +44,10 @@ def _pt_finding() -> Finding:
     )
 
 
-def _load_seeded_app():
-    spec = importlib.util.spec_from_file_location("seeded_app_r", SEEDED)
+def _load_app(app_path: Path, mod_name: str):
+    spec = importlib.util.spec_from_file_location(mod_name, app_path)
     module = importlib.util.module_from_spec(spec)
-    sys.modules["seeded_app_r"] = module
+    sys.modules[mod_name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -55,9 +57,10 @@ class _QuietHandler(WSGIRequestHandler):
         pass
 
 
-@pytest.fixture(scope="module")
-def findings():
-    module = _load_seeded_app()
+@pytest.fixture(scope="module", params=TARGETS, ids=["seeded_flask", "snipstash"])
+def findings(request):
+    source = request.param
+    module = _load_app(Path(source) / "app.py", f"target_{Path(source).name}")
     app = module.create_app()
     port = free_port()
     server = make_server("127.0.0.1", port, app, server_class=_ThreadingWSGIServer, handler_class=_QuietHandler)
@@ -70,9 +73,9 @@ def findings():
             break
         except Exception:
             time.sleep(0.05)
-    report = run_finder(f"http://127.0.0.1:{port}", str(SEEDED.parent), wall_clock_seconds=30)
+    report = run_finder(f"http://127.0.0.1:{port}", source, wall_clock_seconds=45)
     server.shutdown()
-    return report.findings, str(SEEDED.parent)
+    return report.findings, source
 
 
 def _one(findings, vuln_class):

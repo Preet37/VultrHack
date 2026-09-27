@@ -8,3 +8,6 @@ __pycache__/
 targets/seeded_flask/shop.db
 targets/seeded_flask/app_secret.txt
 targets/seeded_flask/docs/
+targets/snipstash/snip.db
+targets/snipstash/app_secret.txt
+targets/snipstash/pastes/
