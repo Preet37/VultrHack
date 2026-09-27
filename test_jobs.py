@@ -181,11 +181,11 @@ def test_registry_refuses_to_start_when_active_jobs_fill_capacity():
     assert registry.create() is None
 
 
-@pytest.mark.parametrize("readiness_fails,missing_log,dns_exit,failed_stage", [
-    (False, False, 1, None), (False, True, 1, None), (True, False, 1, None),
-    (False, False, 0, None), (False, False, 1, "opensandbox_config"),
+@pytest.mark.parametrize("readiness_fails,missing_log,dns_exit,failed_stage,hold", [
+    (False, False, 1, None, 0), (False, True, 1, None, 0), (True, False, 1, None, 5),
+    (False, False, 0, None, 0), (False, False, 1, "opensandbox_config", 5),
 ])
-def test_sandbox_worker_proves_private_path_and_cleans_up(monkeypatch, readiness_fails, missing_log, dns_exit, failed_stage):
+def test_sandbox_worker_proves_private_path_and_cleans_up(monkeypatch, readiness_fails, missing_log, dns_exit, failed_stage, hold):
     calls = []
     destroyed = False
     proof = {
@@ -217,6 +217,9 @@ def test_sandbox_worker_proves_private_path_and_cleans_up(monkeypatch, readiness
                 return {"failure_stage": failed_stage, "exit_code": 1}
             return proof
 
+        def stage(self, token):
+            return "network_create" if readiness_fails else None
+
         def unregister(self, token):
             self.unregistered = token == "R" * 36
 
@@ -238,6 +241,14 @@ def test_sandbox_worker_proves_private_path_and_cleans_up(monkeypatch, readiness
             return httpx.Response(200, json={"status": "healthy"})
         return httpx.Response(401)
 
+    held = []
+
+    async def fake_sleep(seconds):
+        assert not destroyed
+        held.append(seconds)
+
+    monkeypatch.setenv("CERBERUS_DIAGNOSTIC_HOLD_SECONDS", str(hold))
+    monkeypatch.setattr(jobs.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(jobs, "load_keys", lambda: ("account-key", "inference-key"))
     monkeypatch.setattr(jobs.subprocess, "check_output", lambda *args, **kwargs: json.dumps({
         "netbirdIp": "100.124.55.15/16", "management": {"connected": True}, "signal": {"connected": True},
@@ -248,12 +259,15 @@ def test_sandbox_worker_proves_private_path_and_cleans_up(monkeypatch, readiness
     job = jobs.Job(kind="sandbox_smoke")
     asyncio.run(jobs.run_sandbox_smoke_job(job, "A" * 36, signals))
     assert destroyed and signals.unregistered
+    assert held == ([hold] if hold else [])
     assert ("DELETE", "/v2/instances/instance-123") in calls
     assert calls[-1] == ("GET", "/v2/instances/instance-123")
     assert job.status == ("failed" if readiness_fails or missing_log or dns_exit == 0 or failed_stage else "completed")
     assert "A" * 36 not in str(job.error) + str(job.events)
     if failed_stage:
         assert failed_stage in job.error
+    if readiness_fails:
+        assert "timed out after network_create" in job.error
     if not readiness_fails and not missing_log and dns_exit != 0 and not failed_stage:
         assert job.result["destroyed"] is True
         assert job.result["opensandbox"]["exit_code"] == 0
@@ -277,6 +291,17 @@ def test_sandbox_job_refuses_disconnected_control_peer(monkeypatch):
     asyncio.run(jobs.run_sandbox_smoke_job(job, "A" * 36, object()))
     assert job.status == "failed"
     assert "A" * 36 not in str(job.events) + str(job.error)
+
+
+def test_sandbox_job_rejects_unbounded_diagnostic_hold_before_provision(monkeypatch):
+    monkeypatch.setenv("CERBERUS_DIAGNOSTIC_HOLD_SECONDS", "301")
+    monkeypatch.setattr(jobs.subprocess, "check_output", lambda *args, **kwargs: json.dumps({
+        "netbirdIp": "100.124.55.15/16", "management": {"connected": True}, "signal": {"connected": True},
+    }))
+    monkeypatch.setattr(jobs, "load_keys", lambda: pytest.fail("No VM must be created with an unbounded diagnostic hold"))
+    job = jobs.Job(kind="sandbox_smoke")
+    asyncio.run(jobs.run_sandbox_smoke_job(job, "A" * 36, object()))
+    assert job.status == "failed" and job.result is None
 
 
 def test_websocket_requires_first_message_not_query_token(auth):

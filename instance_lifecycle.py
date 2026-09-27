@@ -32,6 +32,7 @@ class ReadySignals:
     def __init__(self):
         self._events = {}
         self._proofs = {}
+        self._stages = {}
 
     def register(self):
         token = secrets.token_urlsafe(32)
@@ -40,6 +41,15 @@ class ReadySignals:
 
     def has(self, token):
         return token in self._events
+
+    def update_stage(self, token, stage):
+        if token not in self._events:
+            return False
+        self._stages[token] = stage
+        return True
+
+    def stage(self, token):
+        return self._stages.get(token)
 
     def signal(self, token, proof):
         event = self._events.get(token)
@@ -56,6 +66,7 @@ class ReadySignals:
     def unregister(self, token):
         self._events.pop(token, None)
         self._proofs.pop(token, None)
+        self._stages.pop(token, None)
 
 
 def docker_user_data(callback_url, ready_token, opensandbox_spike=False, netbird_setup_key=None, private_callback=False):
@@ -86,8 +97,40 @@ def docker_user_data(callback_url, ready_token, opensandbox_spike=False, netbird
         "grep -Eq '(vmx|svm)' /proc/cpuinfo\n"
         "export DEBIAN_FRONTEND=noninteractive\n"
         "apt-get update\n"
+    )
+    if private_callback:
+        from sandbox_platform import netbird_enrollment_user_data
+
+        script += "apt-get install -y curl ca-certificates gnupg\n"
+        script += netbird_enrollment_user_data(netbird_setup_key)
+        failure_url = callback_url.replace("/internal/ready", "/internal/failed")
+        progress_url = callback_url.replace("/internal/ready", "/internal/stage")
+        script += (
+            "CERBERUS_STAGE=docker_install\n"
+            "cerberus_report_failure() {\n"
+            "    result=$?\n"
+            "    trap - EXIT\n"
+            "    if [ \"$result\" -ne 0 ]; then\n"
+            "        if [ \"$CERBERUS_STAGE\" = isolation_probe ] && [ -s /root/cerberus-stage ]; then\n"
+            "            CERBERUS_STAGE=$(cat /root/cerberus-stage)\n"
+            "        fi\n"
+            f"        printf '{{\"stage\":\"%s\",\"exit_code\":%s}}' \"$CERBERUS_STAGE\" \"$result\" | curl -fsS --max-time 10 -X POST -H {shlex.quote(f'Authorization: Bearer {ready_token}')} -H 'Content-Type: application/json' --data-binary @- {shlex.quote(failure_url)} >/dev/null 2>&1 || :\n"
+            "    fi\n"
+            "}\n"
+            "trap cerberus_report_failure EXIT\n"
+            "cerberus_report_stage() {\n"
+            "    CERBERUS_STAGE=$1\n"
+            f"    printf '{{\"stage\":\"%s\"}}' \"$CERBERUS_STAGE\" | curl -fsS --max-time 10 -X POST -H {shlex.quote(f'Authorization: Bearer {ready_token}')} -H 'Content-Type: application/json' --data-binary @- {shlex.quote(progress_url)} >/dev/null 2>&1 || :\n"
+            "}\n"
+            "cerberus_report_stage docker_install\n"
+        )
+    script += (
         "apt-get install -y docker.io curl ca-certificates gnupg\n"
         "systemctl enable --now docker\n"
+    )
+    if private_callback:
+        script += "cerberus_report_stage gvisor_install\n"
+    script += (
         "curl -fsSL https://gvisor.dev/archive.key | gpg --batch --yes --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg\n"
         "printf '%s\\n' \"deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main\" > /etc/apt/sources.list.d/gvisor.list\n"
         "apt-get update\n"
@@ -95,33 +138,24 @@ def docker_user_data(callback_url, ready_token, opensandbox_spike=False, netbird
         "runsc install\n"
         "python3 -c 'import json; from pathlib import Path; p=Path(\"/etc/docker/daemon.json\"); config=json.loads(p.read_text()); config[\"default-runtime\"]=\"runsc\"; p.write_text(json.dumps(config))'\n"
         "systemctl restart docker\n"
+    )
+    if private_callback:
+        script += "cerberus_report_stage runtime_smoke\n"
+    script += (
         "sandbox_output=$(docker run --rm --runtime=runsc --network=none --read-only --cap-drop=ALL --pids-limit=32 busybox:1.37.0 sh -c 'hostname; uname -a')\n"
         "export SANDBOX_OUTPUT=\"$sandbox_output\"\n"
         "test \"$(docker info --format '{{.DefaultRuntime}}')\" = runsc\n"
         "proof=$(python3 -c 'import json,os,platform,re; flags=open(\"/proc/cpuinfo\").read(); cpu=re.search(r\"\\b(vmx|svm)\\b\",flags).group(1); sandbox=os.environ[\"SANDBOX_OUTPUT\"].splitlines(); print(json.dumps({\"hostname\":platform.node(),\"uname\":\" \".join(os.uname()),\"cpu_virt\":cpu,\"kvm_device\":os.path.exists(\"/dev/kvm\"),\"kvm_access\":os.access(\"/dev/kvm\",os.R_OK|os.W_OK),\"runtime\":\"runsc\",\"sandbox_hostname\":sandbox[0],\"sandbox_uname\":sandbox[1],\"exit_code\":0}))')\n"
     )
-    if netbird_setup_key is not None:
+    if netbird_setup_key is not None and not private_callback:
         from sandbox_platform import netbird_enrollment_user_data
 
         script += netbird_enrollment_user_data(netbird_setup_key)
-    if private_callback:
-        failure_url = callback_url.replace("/internal/ready", "/internal/failed")
-        script += (
-            "CERBERUS_STAGE=opensandbox_dependencies\n"
-            "cerberus_report_failure() {\n"
-            "    result=$?\n"
-            "    trap - EXIT\n"
-            "    if [ \"$result\" -ne 0 ]; then\n"
-            f"        printf '{{\"stage\":\"%s\",\"exit_code\":%s}}' \"$CERBERUS_STAGE\" \"$result\" | curl -fsS --max-time 10 -X POST -H {shlex.quote(f'Authorization: Bearer {ready_token}')} -H 'Content-Type: application/json' --data-binary @- {shlex.quote(failure_url)} >/dev/null 2>&1 || :\n"
-            "    fi\n"
-            "}\n"
-            "trap cerberus_report_failure EXIT\n"
-        )
     if opensandbox_spike:
         from sandbox_platform import opensandbox_spike_user_data
 
-        script += opensandbox_spike_user_data(netbird=netbird_setup_key is not None)
-    callback_stage = "CERBERUS_STAGE=ready_callback\n" if private_callback else ""
+        script += opensandbox_spike_user_data(netbird=netbird_setup_key is not None, report_stages=private_callback)
+    callback_stage = "cerberus_report_stage ready_callback\n" if private_callback else ""
     return script + callback_stage + (
         f"curl --fail --silent --show-error --retry 12 --retry-delay 5 --max-time 15 -X POST "
         f"-H {shlex.quote(f'Authorization: Bearer {ready_token}')} -H 'Content-Type: application/json' "

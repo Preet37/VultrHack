@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from instance_lifecycle import ReadySignals, VultrInstances, docker_user_data, temporary_instance, verify_instance
-from main import app, callback_app, ready_signals
+from main import BOOTSTRAP_STAGES, app, callback_app, ready_signals
 
 
 def test_create_uses_cloud_init_without_vultr_keys():
@@ -145,7 +145,19 @@ def test_private_ready_callback_requires_netbird_smoke_and_no_public_http():
     script = docker_user_data(url, "ready-token", True, "A" * 36, private_callback=True)
     assert url in script
     assert "http://100.124.55.15:8000/internal/failed" in script
+    assert "http://100.124.55.15:8000/internal/stage" in script
     assert "trap cerberus_report_failure EXIT" in script
+    assert "cerberus_report_stage docker_install" in script
+    assert "cerberus_report_stage gvisor_install" in script
+    assert "cerberus_report_stage runtime_smoke" in script
+    assert "cerberus_report_stage isolation_probe" in script
+    assert {line.split()[-1] for line in script.splitlines() if line.startswith("cerberus_report_stage ")} <= BOOTSTRAP_STAGES
+    assert "cat /root/cerberus-stage" in script
+    assert script.index("netbird up --setup-key-file") < script.index("apt-get install -y docker.io")
+    assert script.index("trap cerberus_report_failure EXIT") < script.index("apt-get install -y docker.io")
+    assert "CERBERUS_STAGE=docker_install" in script
+    assert "cerberus_report_stage gvisor_install" in script
+    assert "cerberus_report_stage runtime_smoke" in script
     assert script.count("A" * 36) == 1
     assert subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True).returncode == 0
     with pytest.raises(ValueError):
@@ -308,6 +320,28 @@ def test_ready_callback_rejects_invalid_opensandbox_result():
     asyncio.run(request())
 
 
+def test_private_stage_callback_records_progress_without_claiming_readiness():
+    async def request():
+        token = ready_signals.register()
+        try:
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                path = "/internal/stage"
+                headers = {"Authorization": f"Bearer {token}"}
+                assert (await client.post(path, json={"stage": "docker_install"})).status_code == 404
+                assert (await client.post(path, headers=headers, json={"stage": "arbitrary"})).status_code == 400
+                assert (await client.post(path, headers=headers, json={"stage": "docker_install", "secret": "not-allowed"})).status_code == 400
+                assert (await client.post(path, headers=headers, content=b"x" * 257)).status_code == 413
+                assert (await client.post(path, headers=headers, json={"stage": "docker_install"})).status_code == 204
+            assert ready_signals.stage(token) == "docker_install"
+            with pytest.raises(TimeoutError):
+                await ready_signals.wait(token, timeout=0.01)
+        finally:
+            ready_signals.unregister(token)
+        assert ready_signals.stage(token) is None
+
+    asyncio.run(request())
+
+
 def test_private_failure_callback_rejects_untrusted_details_and_signals_safe_stage():
     async def request():
         token = ready_signals.register()
@@ -337,10 +371,11 @@ def test_temporary_callback_server_exposes_no_other_routes():
                 await client.get("/internal/ready"),
                 await client.post("/internal/ready"),
                 await client.post("/internal/failed"),
+                await client.post("/internal/stage"),
             )
 
-    home, docs, schema, wrong_method, unauthorized, private_failure = asyncio.run(request())
-    assert [response.status_code for response in (home, docs, schema, wrong_method, unauthorized, private_failure)] == [404, 404, 404, 405, 404, 404]
+    home, docs, schema, wrong_method, unauthorized, private_failure, private_stage = asyncio.run(request())
+    assert [response.status_code for response in (home, docs, schema, wrong_method, unauthorized, private_failure, private_stage)] == [404, 404, 404, 405, 404, 404, 404]
 
 
 def test_ready_timeout():

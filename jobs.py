@@ -115,12 +115,23 @@ async def run_sandbox_smoke_job(job, setup_key, signals):
     instance_id = None
     token = None
     failure_stage = None
+    readiness_timed_out = False
     await job.publish("running", "preflight")
     try:
         status = json.loads(subprocess.check_output(["netbird", "status", "--json"], text=True))
         address = ipaddress.ip_interface(status["netbirdIp"]).ip
         if status["management"]["connected"] is not True or status["signal"]["connected"] is not True or address not in ipaddress.ip_network("100.64.0.0/10"):
             raise ValueError("Connected NetBird control peer required")
+        raw_hold = os.getenv("CERBERUS_DIAGNOSTIC_HOLD_SECONDS", "0")
+        if not re.fullmatch(r"[0-9]{1,3}", raw_hold) or int(raw_hold) > 300:
+            raise ValueError("Diagnostic hold must be between 0 and 300 seconds")
+        diagnostic_hold = int(raw_hold)
+
+        async def hold_for_diagnostics():
+            if diagnostic_hold:
+                await job.publish("running", "diagnostic_hold")
+                await asyncio.sleep(diagnostic_hold)
+
         api_key, _ = load_keys()
         token = signals.register()
         await job.publish("running", "provisioning")
@@ -130,9 +141,15 @@ async def run_sandbox_smoke_job(job, setup_key, signals):
             async with temporary_instance(api, os.getenv("VULTR_REGION", "ord"), os.getenv("VULTR_PLAN", DEFAULT_VX1_PLAN), 2284, callback, token, True, setup_key, True) as instance_id:
                 await api.wait_active(instance_id)
                 await job.publish("running", "bootstrap")
-                proof = await signals.wait(token, timeout=600)
+                try:
+                    proof = await signals.wait(token, timeout=600)
+                except TimeoutError:
+                    readiness_timed_out = True
+                    await hold_for_diagnostics()
+                    raise
                 if "failure_stage" in proof:
                     failure_stage = proof["failure_stage"]
+                    await hold_for_diagnostics()
                     raise RuntimeError("Sandbox bootstrap reported a bounded failure stage")
                 sandbox = proof.get("opensandbox")
                 isolation = sandbox.get("isolation") if isinstance(sandbox, dict) else None
@@ -178,8 +195,11 @@ async def run_sandbox_smoke_job(job, setup_key, signals):
             "destroyed": True,
         }
     except Exception:
+        last_stage = signals.stage(token) if token is not None else None
         if failure_stage:
             job.error = f"Sandbox bootstrap failed at {failure_stage}; verify cleanup of instance {instance_id}"
+        elif readiness_timed_out and last_stage:
+            job.error = f"Sandbox readiness timed out after {last_stage}; verify cleanup of instance {instance_id}"
         else:
             job.error = f"Sandbox smoke failed; verify cleanup of instance {instance_id}" if instance_id else "Sandbox smoke failed before an instance ID was confirmed"
         await job.publish("failed", "teardown")

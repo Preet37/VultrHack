@@ -3,6 +3,7 @@ import asyncio
 import base64
 import copy
 import json
+import re
 import subprocess
 import tomllib
 import zlib
@@ -13,6 +14,7 @@ import httpx
 import pytest
 
 from instance_lifecycle import docker_user_data
+from main import BOOTSTRAP_STAGES
 from sandbox_platform import (
     assert_closed_probe_port, build_opensandbox_config, check_private_endpoint, host_drop_packets,
     install_forward_drop_probe, install_host_drop_probe, install_ipv6_drop_probe, netbird_enrollment_user_data, opensandbox_spike_user_data,
@@ -88,6 +90,9 @@ def test_spike_bootstrap_is_local_only_pinned_and_syntactically_valid():
     assert "sandbox.commands.run('hostname; uname -a')" in smoke
     assert "sandbox.commands.run('nc -w 3 192.0.2.1 65000')" in smoke
     assert "sandbox.commands.run('nslookup example.com')" in smoke
+    assert "write_text('firewall_ipv6')" in smoke
+    assert "write_text('dns_probe')" in smoke
+    assert set(re.findall(r"Path\('/root/cerberus-stage'\)\.write_text\('([a-z_]+)'\)", smoke)) <= BOOTSTRAP_STAGES
     assert "sandbox.commands.run(f'nc -w 3 {gateway} 65000')" in smoke
     assert smoke.index("assert_closed_probe_port(gateway)") < smoke.index("install_host_drop_probe(bridge)") < smoke.index("install_forward_drop_probe(bridge)") < smoke.index("install_ipv6_drop_probe(bridge)") < smoke.index("sandbox = await Sandbox.create")
     assert "after <= before" in smoke
@@ -365,7 +370,7 @@ def test_generated_smoke_proof_requires_denials_and_host_counter(test_net_exit, 
     if not succeeds or dns_exit == 0 or extra_container:
         with pytest.raises(RuntimeError, match="isolation probe|exactly one"):
             asyncio.run(namespace["check"]())
-        assert saved == {}
+        assert "/root/opensandbox-proof.json" not in saved
     else:
         asyncio.run(namespace["check"]())
         proof = json.loads(saved["/root/opensandbox-proof.json"])
