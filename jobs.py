@@ -158,11 +158,9 @@ async def run_scan_job(job, target_name):
     # sandbox dispatch primitive is injected -- it never falls back to this host.
     entrypoint = (load_manifest(str(source_dir)) or {}).get("entrypoint", "app.py")
     runner = make_runner(str(source_dir), entrypoint)
-    started = False
     try:
         await job.publish("running", "start_target")
         base_url = await asyncio.to_thread(runner.start)
-        started = True
 
         await job.publish("running", "finding")
         report = await asyncio.to_thread(run_finder, base_url, str(source_dir))
@@ -204,8 +202,9 @@ async def run_scan_job(job, target_name):
     else:
         await job.publish("completed", "complete")
     finally:
-        if started:
-            await asyncio.to_thread(runner.stop)
+        # Unconditional: stop() is null-guarded and safe after a failed start, so
+        # a target that spawned but never became healthy is never left running.
+        await asyncio.to_thread(runner.stop)
 
 
 async def run_sandbox_smoke_job(job, setup_key, signals, vpc_mode=False):

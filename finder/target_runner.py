@@ -67,7 +67,13 @@ class LocalSubprocessRunner:
         # _start_target strips CERBERUS_* from the child env so the target plants
         # its manifest-default canaries -- the same values the oracle reads.
         self._proc = _start_target(Path(self._source_dir), self._entrypoint, port)
-        _wait_health(base_url, self._health_timeout)
+        try:
+            _wait_health(base_url, self._health_timeout)
+        except BaseException:
+            # Uphold the contract: a failed start leaves nothing running. Without
+            # this, a target that never answers /health would orphan its process.
+            self.stop()
+            raise
         return base_url
 
     def stop(self) -> None:

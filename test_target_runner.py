@@ -68,3 +68,13 @@ def test_make_runner_honors_env(monkeypatch):
     assert isinstance(make_runner(SEEDED), LocalSubprocessRunner)  # default local
     monkeypatch.setenv("CERBERUS_SCAN_RUNNER", "sandbox")
     assert isinstance(make_runner(SEEDED), SandboxTargetRunner)
+
+
+def test_local_runner_cleans_up_when_target_never_healthy(tmp_path):
+    # An entrypoint that exits immediately never serves /health, so start() must
+    # tear down the process it spawned before raising -- not orphan it.
+    (tmp_path / "app.py").write_text("pass\n")
+    runner = LocalSubprocessRunner(str(tmp_path), "app.py", health_timeout=1.0)
+    with pytest.raises(RuntimeError):
+        runner.start()
+    assert runner._proc is None  # start() upheld its contract on the failure path
