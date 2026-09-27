@@ -31,6 +31,19 @@ SYSTEM_PROMPT = (
 CONFIDENCE_THRESHOLD = 7
 
 
+def _as_confidence(value, default: int = 5) -> int:
+    """Coerce a model-supplied confidence to a 0-10 int, tolerating null/garbage.
+
+    The model sometimes returns "confidence": null or a word like "high". That
+    must not crash the run -- a bad value falls back to a below-threshold default
+    so the item is simply not actively tested.
+    """
+    try:
+        return max(0, min(10, int(value)))
+    except (TypeError, ValueError):
+        return default
+
+
 def _user_prompt(routes: list[dict], candidates: list[Candidate]) -> str:
     surface = json.dumps(routes, indent=2)
     cand_blocks = []
@@ -105,29 +118,33 @@ def triage(candidates: list[Candidate], routes: list[dict], client: InferenceCli
     client = client or InferenceClient()
     by_id = {c.id: c for c in candidates}
     if client.available:
-        result = client.complete_json(SYSTEM_PROMPT, _user_prompt(routes, candidates))
-        if result and isinstance(result.get("plan"), list):
-            plan = []
-            for item in result["plan"]:
-                cid = item.get("candidate_id")
-                cand = by_id.get(cid)
-                if not cand:
-                    continue
-                endpoint, param = _endpoint_param(cand, routes)
-                plan.append(
-                    TestPlanItem(
-                        candidate_id=cid,
-                        vuln_class=cand.vuln_class,
-                        endpoint=item.get("endpoint") or endpoint,
-                        param=item.get("param") or param,
-                        confidence=int(item.get("confidence", 5)),
-                        reason=str(item.get("reason", ""))[:300],
-                        tool=item.get("tool") or cand.vuln_class,
-                        source=client.model_label,
+        try:
+            result = client.complete_json(SYSTEM_PROMPT, _user_prompt(routes, candidates))
+            if result and isinstance(result.get("plan"), list):
+                plan = []
+                for item in result["plan"]:
+                    if not isinstance(item, dict):
+                        continue
+                    cand = by_id.get(item.get("candidate_id"))
+                    if not cand:
+                        continue
+                    endpoint, param = _endpoint_param(cand, routes)
+                    plan.append(
+                        TestPlanItem(
+                            candidate_id=cand.id,
+                            vuln_class=cand.vuln_class,
+                            endpoint=item.get("endpoint") or endpoint,
+                            param=item.get("param") or param,
+                            confidence=_as_confidence(item.get("confidence")),
+                            reason=str(item.get("reason", ""))[:300],
+                            tool=item.get("tool") or cand.vuln_class,
+                            source=client.model_label,
+                        )
                     )
-                )
-            if plan:
-                plan.sort(key=lambda p: p.confidence, reverse=True)
-                return plan, client.model_label
+                if plan:
+                    plan.sort(key=lambda p: p.confidence, reverse=True)
+                    return plan, client.model_label
+        except Exception as exc:  # a malformed model reply must never crash the run
+            client.last_error = f"triage parse failed: {exc}"
     # Fallback: offline heuristic (and surface why the model path was skipped).
     return _offline_plan(candidates, routes), f"offline-heuristic ({client.last_error or 'no key'})"

@@ -48,9 +48,12 @@ def crawl(base_url: str, seeds: list[str] | None = None, timeout: float = 8.0) -
         with httpx.Client(timeout=timeout, follow_redirects=True) as client:
             while to_visit and len(visited) < 15:
                 path = to_visit.pop(0)
-                if path in visited:
+                # Dedup by bare path (ignoring the query), matching the enqueue
+                # guard below, so /product?id=1..N is not re-fetched once per id.
+                bare = urlparse(path).path or "/"
+                if bare in visited:
                     continue
-                visited.add(path)
+                visited.add(bare)
                 url = urljoin(base_url, path)
                 try:
                     resp = client.get(url)

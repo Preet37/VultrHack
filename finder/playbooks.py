@@ -121,6 +121,11 @@ def confirm_path_traversal(base_url: str, endpoint: str, input_source: str, time
 
 # --- Registry ----------------------------------------------------------------
 
+# NOTE: both confirmers today fire GET requests with the payload in a query
+# parameter. Sinks fed from POST bodies, headers, cookies, or JSON are flagged
+# by the sweep but not yet confirmable -- adding method/source-aware payload
+# delivery is the next confirmer increment. Until then such candidates surface
+# in coverage's not_reached rather than being falsely cleared.
 CONFIRMERS = {
     "sqli": confirm_sqli,
     "path_traversal": confirm_path_traversal,

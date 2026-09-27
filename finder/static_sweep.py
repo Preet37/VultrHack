@@ -2,8 +2,9 @@
 
 This is the raw candidate list handed to the model for triage. It is a fast,
 lightweight AST pass, not a full analyzer -- the canary oracle is what actually
-confirms a hit, so the sweep is allowed to over-flag. If `semgrep` is installed
-it is used for richer coverage; otherwise the built-in AST detector runs.
+confirms a hit, so the sweep is allowed to over-flag. The AST detector is
+authoritative for Python targets; a cross-language semgrep pass is a planned
+enrichment and is not wired in yet.
 
 For each supported class we look for a dangerous sink call whose argument is
 NOT a pure constant and that is reachable from request-derived (tainted) input.
@@ -12,8 +13,6 @@ NOT a pure constant and that is reachable from request-derived (tainted) input.
 from __future__ import annotations
 
 import ast
-import shutil
-import subprocess
 from pathlib import Path
 
 from finder.models import Candidate
@@ -67,12 +66,8 @@ def _contains_taint(node: ast.AST, tainted: set[str]) -> bool:
 
 
 def _arg_is_dynamic(node: ast.AST) -> bool:
-    """True if the argument is built dynamically (concat/format/f-string/name), not a literal."""
-    if isinstance(node, ast.Constant):
-        return False
-    if isinstance(node, (ast.BinOp, ast.JoinedStr, ast.Call, ast.Name, ast.Attribute, ast.Subscript)):
-        return True
-    return True
+    """True if the argument is built dynamically (concat/format/f-string/name), not a plain literal."""
+    return not isinstance(node, ast.Constant)
 
 
 def _param_hint(node: ast.AST) -> str:
@@ -192,20 +187,11 @@ def _ast_sweep(source_dir: str) -> list[Candidate]:
     return out
 
 
-def _semgrep_available() -> bool:
-    return shutil.which("semgrep") is not None
-
-
 def sweep(source_dir: str) -> list[Candidate]:
-    """Return candidate sinks. Uses the built-in AST detector; semgrep is optional enrichment."""
-    candidates = _ast_sweep(source_dir)
-    # Semgrep, when present, adds coverage across languages. The AST detector is
-    # authoritative for Python; we keep semgrep as a best-effort supplement.
-    if _semgrep_available():
-        try:
-            subprocess.run(
-                ["semgrep", "--version"], capture_output=True, timeout=10, check=False
-            )
-        except (OSError, subprocess.SubprocessError):
-            pass
-    return candidates
+    """Return candidate sinks flagged in the target source.
+
+    The built-in AST detector is authoritative for Python targets. A semgrep
+    pass for cross-language coverage is a planned enrichment; it is not wired in
+    yet, so we do not imply it ran.
+    """
+    return _ast_sweep(source_dir)

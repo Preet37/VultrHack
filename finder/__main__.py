@@ -31,7 +31,9 @@ def main(argv: list[str] | None = None) -> int:
         wall_clock_seconds=args.wall_clock,
     )
     print(json.dumps(report.to_dict(), indent=2))
-    return 0 if report.findings else 0  # a clean run is not an error
+    # Findings are reported in the JSON, not via the exit code; a clean run and a
+    # run with findings both exit 0. Only an internal error is a failed process.
+    return 0
 
 
 if __name__ == "__main__":
