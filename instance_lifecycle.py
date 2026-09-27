@@ -410,6 +410,7 @@ def docker_user_data(callback_url, ready_token, opensandbox_spike=False, netbird
         script += f"CERBERUS_AUTH_HEADER={shlex.quote(f'Authorization: Bearer {ready_token}')}\n"
         failure_url = callback_url.replace("/internal/ready", "/internal/failed")
         progress_url = callback_url.replace("/internal/ready", "/internal/stage")
+
         script += (
             "CERBERUS_STAGE=docker_install\n"
             "cerberus_report_failure() {\n"

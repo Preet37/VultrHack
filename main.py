@@ -84,15 +84,17 @@ async def instance_ready(request: Request, authorization: str | None = Header(de
         proof = await request.json()
     except ValueError:
         raise HTTPException(status_code=400)
+    target_run_proof = isinstance(proof, dict) and proof.get("target") == "healthy" and isinstance(proof.get("endpoint"), str)
+    required_strings = ("hostname", "uname") + (() if target_run_proof else ("sandbox_hostname", "sandbox_uname"))
     if (
         not isinstance(proof, dict)
-        or any(not isinstance(proof.get(field), str) or not proof[field] or len(proof[field]) > 256 or not proof[field].isprintable() for field in ("hostname", "uname", "sandbox_hostname", "sandbox_uname"))
+        or any(not isinstance(proof.get(field), str) or not proof[field] or len(proof[field]) > 256 or not proof[field].isprintable() for field in required_strings)
         or proof.get("cpu_virt") not in ("vmx", "svm")
         or proof.get("kvm_device") is not True
         or proof.get("kvm_access") is not True
-        or proof.get("runtime") != "runsc"
-        or type(proof.get("exit_code")) is not int
-        or proof["exit_code"] != 0
+        or (target_run_proof and proof.get("runtime") not in ("runsc", "microsandbox"))
+        or (not target_run_proof and proof.get("runtime") != "runsc")
+        or (not target_run_proof and (type(proof.get("exit_code")) is not int or proof["exit_code"] != 0))
     ):
         raise HTTPException(status_code=400)
     if "opensandbox" in proof:
