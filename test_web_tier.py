@@ -36,5 +36,7 @@ def test_create_web_tier_payload_shape():
     assert payload["tags"] == ["cerberus-web"]
     decoded = base64.b64decode(payload["user_data"]).decode()
     assert "cerberus-web.service" in decoded
+    allowed = build_create_web_tier_payload("x", "ord", "vx1-g-2c-8g-120s")
+    assert allowed["plan"] == "vx1-g-2c-8g-120s"
     with pytest.raises(ValueError):
-        build_create_web_tier_payload("x", "ord", "vx1-g-2c-8g-120s")
+        build_create_web_tier_payload("x", "ord", "weird-plan")
