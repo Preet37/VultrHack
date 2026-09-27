@@ -456,7 +456,7 @@ def test_sandbox_worker_proves_private_path_and_cleans_up(monkeypatch, readiness
         nonlocal destroyed
         calls.append((request.method, request.url.path))
         if request.method == "POST":
-            script = base64.b64decode(json.loads(request.content)["user_data"]).decode()
+            script = unpack_vpc_payload(base64.b64decode(json.loads(request.content)["user_data"]).decode())
             assert "http://100.124.55.15:8000/internal/ready" in script
             assert script.count("A" * 36) == 1
             assert "account-key" not in script
@@ -549,7 +549,7 @@ def test_vpc_worker_proves_private_connection_without_a_netbird_setup_key(monkey
             return httpx.Response(405)
         if request.method == "POST":
             payload = json.loads(request.content)
-            script = base64.b64decode(payload["user_data"]).decode()
+            script = unpack_vpc_payload(base64.b64decode(payload["user_data"]).decode())
             assert payload["attach_vpc"] == [vpc_id]
             assert "netbird up" not in script and "account-key" not in script
             return httpx.Response(202, json={"instance": {"id": "instance-123"}})

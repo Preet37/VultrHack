@@ -201,6 +201,8 @@ def test_netbird_test_rejects_open_env_permissions(monkeypatch, tmp_path):
 def test_private_ready_callback_requires_netbird_smoke_and_no_public_http():
     url = "http://100.124.55.15:8000/internal/ready"
     script = docker_user_data(url, "ready-token", True, "A" * 36, private_callback=True)
+    if "vpc_payload=$(python3 -c " in script:
+        script = unpack_vpc_payload(script)
     assert url in script
     assert "http://100.124.55.15:8000/internal/failed" in script
     assert "http://100.124.55.15:8000/internal/stage" in script
